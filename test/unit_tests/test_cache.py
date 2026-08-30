@@ -2,27 +2,32 @@ from datetime import UTC, datetime
 
 import fakeredis.aioredis
 
-from auth_test.adapter.cache.null_cache import NullCache
-from auth_test.adapter.cache.redis_cache import RedisCache
-from auth_test.application.common import user_cache_codec
-from auth_test.entities.permission.models import Permission
-from auth_test.entities.permission.value_objects import PermissionId
-from auth_test.entities.role.models import Role
-from auth_test.entities.role.value_objects import RoleId
-from auth_test.entities.user.models import User
-from auth_test.entities.user.value_objects import Email, UserId
+from users_service.adapter.cache.null_cache import NullCache
+from users_service.adapter.cache.redis_cache import RedisCache
+from users_service.application.common import user_cache_codec
+from users_service.entities.permission.models import Permission
+from users_service.entities.permission.value_objects import PermissionId
+from users_service.entities.role.models import Role
+from users_service.entities.role.value_objects import RoleId
+from users_service.entities.user.models import User
+from users_service.entities.user.value_objects import (
+    Email,
+    UserId,
+    Username,
+    VisitorId,
+)
 
 
 def _user() -> User:
     return User(
         id=UserId(5),
         email=Email("u@example.com"),
+        username=Username("user"),
         password_hash="hash",
-        first_name="U",
-        last_name="Ser",
-        middle_name=None,
+        display_name="Ser",
         is_active=True,
         is_superuser=False,
+        visitor_id=VisitorId("2f1c9d4e-0000-4000-8000-000000000001"),
         created_at=datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
         updated_at=datetime(2026, 1, 2, 12, 0, tzinfo=UTC),
         roles=[
@@ -31,7 +36,7 @@ def _user() -> User:
                 name="viewer",
                 description="reads",
                 permissions=[
-                    Permission(PermissionId(1), "document", "read", "View"),
+                    Permission(PermissionId(1), "account", "read", "View"),
                 ],
             )
         ],

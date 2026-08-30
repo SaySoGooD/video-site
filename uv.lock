@@ -130,7 +130,7 @@ wheels = [
 ]
 
 [[package]]
-name = "auth-test"
+name = "users-service"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

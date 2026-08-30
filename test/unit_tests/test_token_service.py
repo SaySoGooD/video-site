@@ -1,8 +1,8 @@
 import pytest
 
-from auth_test.adapter.security.token_service import JwtTokenService
-from auth_test.application.common.errors import AuthenticationError
-from auth_test.entities.user.value_objects import UserId
+from users_service.adapter.security.token_service import JwtTokenService
+from users_service.application.common.errors import AuthenticationError
+from users_service.entities.user.value_objects import UserId
 
 
 class TestJwtTokenService:

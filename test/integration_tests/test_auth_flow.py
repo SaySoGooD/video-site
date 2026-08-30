@@ -1,4 +1,4 @@
-from conftest import auth_header, login
+from conftest import auth_header, login, login_pair, register
 from fastapi.testclient import TestClient
 
 
@@ -9,32 +9,29 @@ class TestAuthFlow:
         assert response.json() == {"status": "ok"}
 
     def test_register_login_and_me(self, client: TestClient) -> None:
-        register = client.post(
-            "/auth/register",
-            json={
-                "email": "new@example.com",
-                "password": "password1",
-                "password_repeat": "password1",
-                "first_name": "New",
-                "last_name": "User",
-            },
-        )
-        assert register.status_code == 201, register.text
-        assert register.json()["email"] == "new@example.com"
+        created = register(client, "new@example.com", "newbie")
+        assert created["email"] == "new@example.com"
+        assert created["username"] == "newbie"
 
-        token = login(client, "new@example.com", "password1")
+        token = login(client, "new@example.com", "password123")
         me = client.get("/auth/me", headers=auth_header(token))
         assert me.status_code == 200
         assert me.json()["email"] == "new@example.com"
+
+    def test_registration_grants_the_default_role(
+        self, client: TestClient
+    ) -> None:
+        created = register(client, "roled@example.com", "roled")
+        assert [r["name"] for r in created["roles"]] == ["user"]
 
     def test_register_password_mismatch_is_422(self, client: TestClient) -> None:
         response = client.post(
             "/auth/register",
             json={
                 "email": "mismatch@example.com",
-                "password": "password1",
-                "password_repeat": "password2",
-                "first_name": "Mis",
+                "username": "mismatch",
+                "password": "password123",
+                "password_repeat": "password124",
             },
         )
         assert response.status_code == 422
@@ -44,9 +41,21 @@ class TestAuthFlow:
             "/auth/register",
             json={
                 "email": "admin@example.com",
-                "password": "password1",
-                "password_repeat": "password1",
-                "first_name": "Dup",
+                "username": "notadmin",
+                "password": "password123",
+                "password_repeat": "password123",
+            },
+        )
+        assert response.status_code == 409
+
+    def test_register_duplicate_username_is_409(self, client: TestClient) -> None:
+        response = client.post(
+            "/auth/register",
+            json={
+                "email": "other@example.com",
+                "username": "admin",
+                "password": "password123",
+                "password_repeat": "password123",
             },
         )
         assert response.status_code == 409
@@ -63,10 +72,18 @@ class TestAuthFlow:
         response = client.patch(
             "/auth/me",
             headers=auth_header(token),
-            json={"first_name": "Victoria"},
+            json={"display_name": "Victoria", "username": "victoria"},
         )
         assert response.status_code == 200
-        assert response.json()["first_name"] == "Victoria"
+        assert response.json()["display_name"] == "Victoria"
+        assert response.json()["username"] == "victoria"
+
+    def test_username_taken_on_update_is_409(self, client: TestClient) -> None:
+        token = login(client, "viewer@example.com", "viewer123")
+        response = client.patch(
+            "/auth/me", headers=auth_header(token), json={"username": "admin"}
+        )
+        assert response.status_code == 409
 
     def test_logout_invalidates_token(self, client: TestClient) -> None:
         token = login(client, "viewer@example.com", "viewer123")
@@ -79,16 +96,8 @@ class TestAuthFlow:
         assert after.status_code == 401
 
     def test_soft_delete_blocks_login(self, client: TestClient) -> None:
-        client.post(
-            "/auth/register",
-            json={
-                "email": "temp@example.com",
-                "password": "password1",
-                "password_repeat": "password1",
-                "first_name": "Temp",
-            },
-        )
-        token = login(client, "temp@example.com", "password1")
+        register(client, "temp@example.com", "tempuser")
+        token = login(client, "temp@example.com", "password123")
 
         assert (
             client.delete("/auth/me", headers=auth_header(token)).status_code == 204
@@ -96,45 +105,39 @@ class TestAuthFlow:
         assert client.get("/auth/me", headers=auth_header(token)).status_code == 401
         relogin = client.post(
             "/auth/login",
-            json={"email": "temp@example.com", "password": "password1"},
+            json={"email": "temp@example.com", "password": "password123"},
         )
         assert relogin.status_code == 401
 
 
 class TestRefreshFlow:
-    @staticmethod
-    def _login_pair(client: TestClient) -> tuple[str, str]:
-        r = client.post(
-            "/auth/login",
-            json={"email": "viewer@example.com", "password": "viewer123"},
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        return body["access_token"], body["refresh_token"]
-
     def test_login_returns_both_tokens(self, client: TestClient) -> None:
-        access, refresh = self._login_pair(client)
+        access, refresh = login_pair(client, "viewer@example.com", "viewer123")
         assert access and refresh and access != refresh
 
     def test_refresh_issues_working_access(self, client: TestClient) -> None:
-        _, refresh = self._login_pair(client)
-        r = client.post("/auth/refresh", json={"refresh_token": refresh})
-        assert r.status_code == 200, r.text
-        new_access = r.json()["access_token"]
-        me = client.get("/auth/me", headers=auth_header(new_access))
-        assert me.status_code == 200
+        _, refresh = login_pair(client, "viewer@example.com", "viewer123")
+        response = client.post("/auth/refresh", json={"refresh_token": refresh})
+        assert response.status_code == 200, response.text
+        new_access = response.json()["tokens"]["access_token"]
+        assert client.get("/auth/me", headers=auth_header(new_access)).status_code == 200
 
     def test_old_refresh_rejected_after_rotation(self, client: TestClient) -> None:
-        _, refresh = self._login_pair(client)
-        assert client.post("/auth/refresh", json={"refresh_token": refresh}).status_code == 200
-        # rotation revoked the presented refresh token -> replay fails
+        _, refresh = login_pair(client, "viewer@example.com", "viewer123")
+        first = client.post("/auth/refresh", json={"refresh_token": refresh})
+        assert first.status_code == 200
         replay = client.post("/auth/refresh", json={"refresh_token": refresh})
         assert replay.status_code == 401
 
-    def test_refresh_token_is_not_accepted_as_access(self, client: TestClient) -> None:
-        _, refresh = self._login_pair(client)
+    def test_refresh_token_is_not_accepted_as_access(
+        self, client: TestClient
+    ) -> None:
+        _, refresh = login_pair(client, "viewer@example.com", "viewer123")
         assert client.get("/auth/me", headers=auth_header(refresh)).status_code == 401
 
-    def test_access_token_is_not_accepted_for_refresh(self, client: TestClient) -> None:
-        access, _ = self._login_pair(client)
-        assert client.post("/auth/refresh", json={"refresh_token": access}).status_code == 401
+    def test_access_token_is_not_accepted_for_refresh(
+        self, client: TestClient
+    ) -> None:
+        access, _ = login_pair(client, "viewer@example.com", "viewer123")
+        response = client.post("/auth/refresh", json={"refresh_token": access})
+        assert response.status_code == 401

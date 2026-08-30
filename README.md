@@ -1,11 +1,32 @@
-# auth-test
+# users-service
 
-A custom **authentication & authorization** backend built from scratch — the
-framework's built-in auth is deliberately *not* used. It implements its own
-user lifecycle, JWT/session handling, and a **role-based access control
-(RBAC)** model whose rules live in the database and can be edited at runtime by
-an administrator.
+The account service of a video site. It answers exactly one question —
 
+```
+WHO IS THIS USER?
+```
+
+— and nothing else. It owns accounts, credentials, login sessions and the RBAC
+model; it does not own videos, uploads, comments or analytics. Those are
+separate services that ask this one who the caller is.
+
+```
+                  Browser
+                 /       \
+                /         \
+               ▼           ▼
+          users-service   Matomo
+               │
+               ▼
+          visitor / session
+               │
+               ▼
+         Event Collector
+```
+
+`users-service` knows *who*, an analytics service knows *what a visitor did*,
+and Matomo does standard web analytics. The only thing this service does for
+analytics is issue and store a **`visitor_id`** — see below.
 
 ## Tech stack
 
@@ -17,128 +38,149 @@ an administrator.
 - dependency-injector for composition
 - pydantic / pydantic-settings for schemas & config
 
-## Authentication vs. authorization
+## Authentication for a browser: HttpOnly cookies, not localStorage
 
-- **Authentication** — *who are you?* Handled by login (email + password →
-  signed JWT) and by resolving that token on every request. Failure ⇒ **401**.
-- **Authorization** — *are you allowed?* Handled by the RBAC model below: a
-  user's roles are checked against the permission a route requires. Failure ⇒
-  **403**.
+The token model is unchanged — a short-lived **access token**, a long-lived
+**refresh token**, and a server-side **session** row whose `jti` both tokens
+carry so either can be revoked. What changed is *where the browser keeps them*:
+
+```
+Browser
+   │
+   │ HttpOnly cookie
+   ▼
+Gateway
+   │
+   ▼
+users-service
+```
+
+- `POST /auth/login` sets `access_token` and `refresh_token` as **HttpOnly,
+  Secure, SameSite** cookies. They are deliberately **absent from the response
+  body** — a script on the page (including an injected one) cannot read them.
+- The refresh cookie is scoped to `REFRESH_COOKIE_PATH` (`/auth`), so ordinary
+  API requests never carry it.
+- Because the browser now sends credentials on its own, unsafe requests are
+  verified with a **double-submit CSRF token**: login returns `csrf_token` and
+  sets it as a *readable* cookie; the frontend echoes it in the
+  `X-CSRF-Token` header. Mismatch ⇒ **403**. A foreign site can make the
+  browser send a cookie, but cannot read one.
+- Set `COOKIE_AUTH_ENABLED=false` for non-browser clients (mobile, another
+  service): then `login`/`refresh` return the tokens in the body and the
+  client sends `Authorization: Bearer <token>`. Both modes are always accepted
+  on the read path; the cookie wins when both are present.
+
+## visitor_id — the seam to analytics
+
+Every visitor, logged in or not, is issued an opaque `visitor_id` cookie on
+first contact (UUID v4, 400 days — the browser maximum). It is **not a
+credential**: it identifies a browser, not a person.
+
+- `POST /auth/register` records the current `visitor_id` on the new account, so
+  the visitor's pre-signup activity can be attributed once they sign up.
+- Every login session stores the `visitor_id` it was created from.
+- `GET /auth/me` returns it to the owner, which is how a frontend passes it to
+  Matomo (as a custom dimension) or to the event collector.
+- It never appears on a public profile.
+
+Analytics stays outside this service: it reads the link, this service never
+reports events.
 
 ## Access-control model (database schema)
 
-The model is classic RBAC: **users → roles → permissions**. A permission is the
-atomic rule "may perform *action* on *resource*". Users never hold permissions
-directly — only through roles — which keeps the rules small and manageable.
-
-
-### Tables
+Classic RBAC: **users → roles → permissions**. A permission is the atomic rule
+"may perform *action* on *resource*". Users never hold permissions directly —
+only through roles.
 
 | Table              | Purpose | Key columns |
 |--------------------|---------|-------------|
-| `users`            | Accounts. `is_active=False` is the *soft-delete* state. `is_superuser` bypasses all permission checks. | `id` PK, `email` UNIQUE |
+| `users`            | Accounts. `email` is private, `username` is the public handle. `is_active=False` is the *soft-delete* state; `is_superuser` bypasses all permission checks. `visitor_id` is the browser the account was created from. | `id` PK, `email` UNIQUE, `username` UNIQUE |
 | `roles`            | Named bundles of permissions. | `id` PK, `name` UNIQUE |
-| `permissions`      | Atomic rules — a `(resource, action)` pair, e.g. `document:read`. | `id` PK, UNIQUE `(resource, action)` |
+| `permissions`      | Atomic rules — a `(resource, action)` pair, e.g. `account:read`. | `id` PK, UNIQUE `(resource, action)` |
 | `user_roles`       | Many-to-many: which roles a user has. | composite PK `(user_id, role_id)` |
 | `role_permissions` | Many-to-many: which permissions a role grants. | composite PK `(role_id, permission_id)` |
-| `sessions`         | Server-side login records. Each issued JWT carries a `jti` pointing here so a token can be **revoked** (logout / soft-delete). | `id` PK, `jti` UNIQUE |
+| `sessions`         | Server-side login records, one per device. Each issued JWT carries a `jti` pointing here so a token can be **revoked** (logout / soft-delete / refresh rotation). Also stores `visitor_id`, `user_agent`, `ip_address`, `last_used_at` for the "your devices" screen. | `id` PK, `jti` UNIQUE |
 
 ### How a request is decided
 
-1. Extract the `Authorization: Bearer <jwt>` token.
+1. Take the access token from the auth cookie, or from `Authorization: Bearer`.
 2. **No/invalid token or revoked/expired session → 401** (`AuthenticationError`).
 3. Load the user (with roles + permissions). Inactive user → 401.
-4. The route declares a required permission, e.g. `require_permission("document","read")`.
+4. The route declares a required permission, e.g. `require_permission("account","read")`.
 5. `User.has_permission(resource, action)` = superuser **or** any role grants it.
-   - Granted → **200** with the resource.
-   - Not granted → **403** (`AuthorizationError`).
-
-### Normalization
-
-- **1NF** — every column holds a single atomic value; there are no repeating
-  groups (a user's multiple roles are rows in `user_roles`, not a list column).
-- **2NF** — every table has a key and no non-key column depends on only part of
-  a composite key. The junction tables (`user_roles`, `role_permissions`) are
-  pure keys with no other attributes, so no partial dependency can exist;
-  descriptive attributes live on `users`, `roles`, `permissions` where they
-  depend on the whole (single-column) key.
+   - Granted → **200**; not granted → **403** (`AuthorizationError`).
 
 ### ACID
 
-Each use case runs inside one **unit of work** (`SqlAlchemyUnitOfWork`) that
-wraps a single database transaction. All repositories share that transaction,
-so a use case's writes **commit or roll back together** (atomicity,
-consistency). For example, soft-delete deactivates the user *and* revokes every
-session in one commit — a user is never left half-deleted. Uniqueness of emails
-and `(resource, action)` is enforced by database constraints (isolation +
-durability come from PostgreSQL).
+Each use case runs inside one **unit of work** (`SqlAlchemyUnitOfWork`) wrapping
+a single database transaction. All repositories share it, so a use case's
+writes commit or roll back together. Registration inserts the account *and*
+grants the default role in one commit; soft-delete deactivates the user *and*
+revokes every session in one commit; refresh revokes the old session *and*
+writes the new one in one commit. Uniqueness of `email`, `username` and
+`(resource, action)` is enforced by database constraints.
 
 ### Passwords
 
-Passwords are stored only as salted hashes; plaintext is never persisted. The
-scheme is chosen by `PASSWORD_HASHER` behind the `IPasswordHasher` port:
-
-- **`argon2`** (default) — Argon2id via argon2-cffi; memory-hard, resistant to
-  GPU/ASIC brute force. Parameters and salt are embedded in the hash string.
-- **`pbkdf2`** — PBKDF2-HMAC-SHA256 (standard library),
-  `pbkdf2_sha256$iterations$salt$hash`, constant-time verification.
-
-Switching the scheme means existing hashes of the other format no longer verify
-(re-seed or reset passwords).
+Stored only as salted hashes; plaintext is never persisted. The scheme is
+chosen by `PASSWORD_HASHER` behind the `IPasswordHasher` port: **`argon2`**
+(default, memory-hard Argon2id) or **`pbkdf2`** (PBKDF2-HMAC-SHA256, stdlib).
+Switching the scheme means existing hashes of the other format no longer verify.
 
 ### Caching (optional)
 
 If `REDIS_URL` is set, the authenticated user (with roles/permissions) is cached
-in Redis to avoid a join on every request; otherwise a no-op cache is used and
-Redis is not required. Behind the `ICache` port (`NullCache` / `RedisCache`).
-Security is unaffected: the session is validated against the database on every
-request (logout / soft-delete are immediate), and a user's cache entry is
-invalidated when their roles or profile change. Role↔permission edits converge
-within `AUTH_CACHE_TTL_SECONDS` (default 30).
-
-## Seeded demo data
-
-On startup (when `SEED_ON_STARTUP=true`) the schema is created and demo data is
-inserted **if the database is empty**.
-
-Permissions: `document:read|create|update|delete`, `report:read|export`,
-`access_control:manage`.
-
-| Role     | Permissions |
-|----------|-------------|
-| `admin`  | all (user also flagged `is_superuser`) |
-| `editor` | document read/create/update, report read |
-| `viewer` | document read, report read |
-
-| User                 | Password    | Role   |
-|----------------------|-------------|--------|
-| `admin@example.com`  | `admin123`  | admin  |
-| `editor@example.com` | `editor123` | editor |
-| `viewer@example.com` | `viewer123` | viewer |
+to avoid a join on every request; otherwise a no-op cache is used. Security is
+unaffected: the session is validated against the database on **every** request
+(logout / soft-delete are immediate), and a user's cache entry is invalidated
+when their roles or profile change.
 
 ## API
 
-### Users & auth (module 1)
-- `POST /auth/register` — name/email/password/password_repeat → creates active account (409 duplicate, 422 mismatch)
-- `POST /auth/login` — email + password → `{ access_token, refresh_token, ... }` (401 on bad creds)
-- `POST /auth/refresh` — swap a valid refresh token for a new pair (rotates it; 401 if invalid)
-- `POST /auth/logout` — revoke current session (204)
-- `GET /auth/me` — current profile
-- `PATCH /auth/me` — update own profile
+### Auth
+- `POST /auth/register` — email/username/password/password_repeat → 201 with the
+  new profile (409 duplicate email or username, 422 password mismatch)
+- `POST /auth/login` — email + password → sets cookies, returns
+  `{ user, csrf_token, tokens: null }` (or the tokens, in token mode); 401 on bad creds
+- `POST /auth/refresh` — rotates the session; token from the cookie or the body
+- `POST /auth/logout` — revoke the session and clear the cookies (204)
+- `GET /auth/me` — the owner's view of the account
+- `PATCH /auth/me` — update own profile (username / display name / email)
 - `DELETE /auth/me` — **soft-delete**: `is_active=False` + revoke sessions (204)
 
-### Access-control admin API (module 2) — requires `access_control:manage`
+### Users
+- `GET /users/{id}` — public profile: id, username, display name, created_at.
+  Unauthenticated; 404 for missing or soft-deleted accounts
+- `PATCH /users/me` — same as `PATCH /auth/me`
+- `GET /users/me/sessions` — the caller's live logins, `current: true` on the one
+  the request is using
+- `DELETE /users/me/sessions/{id}` — sign that device out (404 if not the caller's)
+
+### Access-control admin API — requires `access_control:manage`
 - `GET/POST /admin/permissions`
 - `GET/POST /admin/roles`, `DELETE /admin/roles/{id}`
 - `POST /admin/roles/{id}/permissions`, `DELETE /admin/roles/{id}/permissions/{pid}`
 - `GET /admin/users`
 - `POST /admin/users/{id}/roles`, `DELETE /admin/users/{id}/roles/{rid}`
 
-### Mock business objects (module 3) — protected by permissions
-- `GET/POST /documents`, `PUT/DELETE /documents/{id}`
-- `GET /reports`, `POST /reports/export`
+## Seeded demo data
 
-Each returns mock data on success, or 401 / 403 per the rules above.
+On startup (`SEED_ON_STARTUP=true`) the schema is created and demo data is
+inserted **if the database is empty**.
+
+Permissions: `account:read`, `account:moderate`, `access_control:manage`.
+
+| Role        | Permissions |
+|-------------|-------------|
+| `admin`     | all (the seeded admin user is also `is_superuser`) |
+| `moderator` | account read/moderate |
+| `user`      | none — the default role every signup receives |
+
+| User                    | Username    | Password       | Role      |
+|-------------------------|-------------|----------------|-----------|
+| `admin@example.com`     | `admin`     | `admin123`     | admin     |
+| `moderator@example.com` | `moderator` | `moderator123` | moderator |
+| `viewer@example.com`    | `viewer`    | `viewer123`    | user      |
 
 ## Architecture
 
@@ -148,7 +190,7 @@ folder rather than a single module (small DTOs/pydantic models are the only
 exception). Application ports are `ABC`s implemented by the adapters.
 
 ```
-src/auth_test/
+src/users_service/
 ├── entities/                   # Domain: User, Role, Permission, AuthSession
 │   └── <entity>/               #   models.py + value_objects.py per entity
 ├── application/                # Use cases + ports (ABCs)
@@ -158,27 +200,23 @@ src/auth_test/
 │   │   └── interfaces/
 │   │       ├── security/       #   i_password_hasher, i_token_service (+ token DTOs)
 │   │       ├── repositories/   #   one repository ABC per file
-│   │       └── unit_of_work.py
-│   ├── auth/
-│   │   ├── interfaces/         #   one I*UseCase ABC per file
-│   │   └── usecases/           #   one use case per file
-│   └── access_control/
-│       ├── interfaces/         #   one I*UseCase ABC per file
-│       └── usecases/           #   one use case per file
+│   │       └── i_unit_of_work.py
+│   ├── auth/                   #   register, login, refresh, logout, authenticate,
+│   │                           #   update profile, soft-delete
+│   ├── users/                  #   public profile, own sessions, revoke a session
+│   └── access_control/         #   roles & permissions administration
 ├── adapter/
-│   ├── database/
-│   │   ├── base.py             #   DeclarativeBase + association tables
-│   │   ├── orm_models/         #   one ORM model per file
-│   │   ├── mappers/            #   one ORM->entity mapper per file
-│   │   ├── repositories/       #   one repository implementation per file
-│   │   ├── unit_of_work.py
-│   │   └── seed.py             #   schema creation + demo data
-│   ├── memory/                 #   in-memory mock DB (MOCK_DB=True)
+│   ├── database/               #   ORM models, mappers, repositories, UoW, seed
 │   ├── security/               #   Argon2 + PBKDF2 hashers, JWT token service
 │   └── cache/                  #   NullCache + RedisCache
 ├── infrastructure/
-│   ├── api/                    #   routers, request/response models,
-│   │                           #   dependencies (401/403), exception handlers
+│   ├── api/
+│   │   ├── routers/            #   auth, users, admin, health
+│   │   ├── models/             #   request/response schemas
+│   │   ├── cookies.py          #   HttpOnly session + visitor cookies
+│   │   ├── csrf_middleware.py  #   double-submit CSRF check
+│   │   ├── dependencies.py     #   401/403 gates, device info
+│   │   └── exc_handlers.py     #   application errors -> HTTP status codes
 │   └── config.py               #   pydantic-settings Config
 ├── dependency_injection.py     # DI container
 ├── bootstrap.py                # Composition root: app factory + lifespan
@@ -186,45 +224,26 @@ src/auth_test/
 ```
 
 The application layer depends only on **ports** (`IUserRepository`,
-`IUnitOfWork`, `IPasswordHasher`, `ITokenService` — all `ABC`s, named with an
-`I` prefix in `i_*.py` files). SQLAlchemy,
-PyJWT and FastAPI live behind adapters/infrastructure and never leak inward.
-
-## Database backends
-
-`MOCK_DB` selects where data lives, without touching any other layer (the app
-depends only on the `UnitOfWork` / repository ports):
-
-- **`MOCK_DB=True`** (default) — an in-memory mock (`adapter/memory/`). No
-  server to install; data lives in process and resets on restart. Ideal for
-  demos/tests.
-- **`MOCK_DB=False`** — the real SQLAlchemy + PostgreSQL backend
-  (`adapter/database/`), using the `DB_*` settings.
+`ISessionRepository`, `IUnitOfWork`, `IPasswordHasher`, `ITokenService` — all
+`ABC`s in `i_*.py` files). SQLAlchemy, PyJWT and FastAPI live behind
+adapters/infrastructure and never leak inward.
 
 ## Quick start
 
 ```bash
-cd auth_test
+cp .env.example .env      # set DB_* and JWT_SECRET
 uv sync
-uv run python -m auth_test          # MOCK_DB=True by default — no DB needed
-```
-
-To use PostgreSQL instead:
-
-```bash
-cp .env.example .env                # set MOCK_DB=False, DB_* and JWT_SECRET
-uv run python -m auth_test
+uv run python -m users_service
 ```
 
 Open http://localhost:8001/docs
 
-Example:
 ```bash
-curl -X POST http://localhost:8001/auth/login \
+curl -c jar -X POST http://localhost:8001/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@example.com","password":"admin123"}'
 
-curl http://localhost:8001/admin/roles -H "Authorization: Bearer <token>"
+curl -b jar http://localhost:8001/auth/me
 ```
 
 ## Tests
@@ -233,11 +252,17 @@ curl http://localhost:8001/admin/roles -H "Authorization: Bearer <token>"
 uv run pytest -q
 ```
 
-Tests are split into `test/unit_tests/` (pure logic: password hashing, token
-service, domain permission checks) and `test/integration_tests/` (the full
-application stack against an in-memory SQLite database — only the DB engine is
-overridden, so PostgreSQL is not required). Each test file groups its cases in
-a class.
+`test/unit_tests/` covers pure logic (password hashing, token service, domain
+permission checks). `test/integration_tests/` runs the full stack — DI
+container, unit of work, repositories, use cases, routers — against an
+in-memory SQLite database, so only the DB engine is swapped and PostgreSQL is
+not needed for a test run. Both auth modes are exercised: `client` (bearer
+tokens) and `browser` (HttpOnly cookies + CSRF).
+
+## Not built yet
+
+Deliberately left for later milestones: email verification, password reset,
+login rate limiting / lockout, and audit events.
 
 ## License
 

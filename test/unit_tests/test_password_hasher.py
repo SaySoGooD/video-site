@@ -1,4 +1,4 @@
-from auth_test.adapter.security.password_hasher import PBKDF2PasswordHasher
+from users_service.adapter.security.password_hasher import PBKDF2PasswordHasher
 
 
 class TestPBKDF2PasswordHasher:

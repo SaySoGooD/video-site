@@ -1,4 +1,4 @@
-from auth_test.adapter.security.argon2_password_hasher import (
+from users_service.adapter.security.argon2_password_hasher import (
     Argon2PasswordHasher,
 )
 

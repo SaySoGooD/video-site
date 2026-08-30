@@ -1,106 +1,46 @@
-from conftest import auth_header, login
+"""RBAC as seen through the only protected surface this service owns: /admin."""
+
+from conftest import auth_header, login, register
 from fastapi.testclient import TestClient
 
 
-class TestAuthorization:
-    def test_anonymous_request_is_401(self, client: TestClient) -> None:
-        assert client.get("/documents").status_code == 401
+class TestAdminAccess:
+    def test_anonymous_is_401(self, client: TestClient) -> None:
+        assert client.get("/admin/users").status_code == 401
 
-    def test_viewer_can_read_documents(self, client: TestClient) -> None:
-        token = login(client, "viewer@example.com", "viewer123")
-        response = client.get("/documents", headers=auth_header(token))
-        assert response.status_code == 200
-        assert response.json()["resource"] == "document"
+    def test_default_role_is_403(self, client: TestClient) -> None:
+        register(client, "plain@example.com", "plainuser")
+        token = login(client, "plain@example.com", "password123")
+        assert client.get("/admin/users", headers=auth_header(token)).status_code == 403
 
-    def test_viewer_cannot_create_documents_is_403(
+    def test_moderator_lacking_the_permission_is_403(
         self, client: TestClient
     ) -> None:
-        token = login(client, "viewer@example.com", "viewer123")
-        assert (
-            client.post("/documents", headers=auth_header(token)).status_code == 403
-        )
+        token = login(client, "moderator@example.com", "moderator123")
+        # The moderator role carries account:*, not access_control:manage.
+        assert client.get("/admin/roles", headers=auth_header(token)).status_code == 403
 
-    def test_editor_can_create_documents(self, client: TestClient) -> None:
-        token = login(client, "editor@example.com", "editor123")
-        assert (
-            client.post("/documents", headers=auth_header(token)).status_code == 200
-        )
-
-    def test_editor_cannot_delete_documents_is_403(
-        self, client: TestClient
-    ) -> None:
-        token = login(client, "editor@example.com", "editor123")
-        assert (
-            client.delete("/documents/1", headers=auth_header(token)).status_code
-            == 403
-        )
-
-    def test_admin_can_reach_admin_api(self, client: TestClient) -> None:
+    def test_admin_is_allowed(self, client: TestClient) -> None:
         token = login(client, "admin@example.com", "admin123")
-        assert (
-            client.get("/admin/roles", headers=auth_header(token)).status_code == 200
-        )
+        response = client.get("/admin/roles", headers=auth_header(token))
+        assert response.status_code == 200
+        assert {r["name"] for r in response.json()} == {"admin", "moderator", "user"}
 
-    def test_non_admin_blocked_from_admin_api_is_403(
+    def test_granting_a_role_changes_what_a_user_may_do(
         self, client: TestClient
     ) -> None:
-        token = login(client, "editor@example.com", "editor123")
-        assert (
-            client.get("/admin/roles", headers=auth_header(token)).status_code == 403
-        )
+        admin = auth_header(login(client, "admin@example.com", "admin123"))
+        created = register(client, "promoted@example.com", "promoted")
+        user = auth_header(login(client, "promoted@example.com", "password123"))
 
-    def test_admin_grants_permission_and_access_changes(
-        self, client: TestClient
-    ) -> None:
-        admin_token = login(client, "admin@example.com", "admin123")
-        headers = auth_header(admin_token)
+        assert client.get("/admin/users", headers=user).status_code == 403
 
+        roles = client.get("/admin/roles", headers=admin).json()
+        admin_role_id = next(r["id"] for r in roles if r["name"] == "admin")
         client.post(
-            "/auth/register",
-            json={
-                "email": "grantee@example.com",
-                "password": "password1",
-                "password_repeat": "password1",
-                "first_name": "Grant",
-            },
-        )
-        grantee_token = login(client, "grantee@example.com", "password1")
-        assert (
-            client.get(
-                "/documents", headers=auth_header(grantee_token)
-            ).status_code
-            == 403
+            f"/admin/users/{created['id']}/roles",
+            headers=admin,
+            json={"role_id": admin_role_id},
         )
 
-        permissions = client.get("/admin/permissions", headers=headers).json()
-        doc_read = next(
-            p
-            for p in permissions
-            if p["resource"] == "document" and p["action"] == "read"
-        )
-
-        new_role = client.post(
-            "/admin/roles",
-            headers=headers,
-            json={"name": "doc-reader", "description": "reads docs"},
-        ).json()
-        client.post(
-            f"/admin/roles/{new_role['id']}/permissions",
-            headers=headers,
-            json={"permission_id": doc_read["id"]},
-        )
-
-        users = client.get("/admin/users", headers=headers).json()
-        grantee = next(u for u in users if u["email"] == "grantee@example.com")
-        client.post(
-            f"/admin/users/{grantee['id']}/roles",
-            headers=headers,
-            json={"role_id": new_role["id"]},
-        )
-
-        assert (
-            client.get(
-                "/documents", headers=auth_header(grantee_token)
-            ).status_code
-            == 200
-        )
+        assert client.get("/admin/users", headers=user).status_code == 200
