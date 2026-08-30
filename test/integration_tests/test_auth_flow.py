@@ -1,4 +1,4 @@
-from conftest import auth_header, login, login_pair, register
+from conftest import API, auth_header, login, login_pair, register
 from fastapi.testclient import TestClient
 
 
@@ -14,7 +14,7 @@ class TestAuthFlow:
         assert created["username"] == "newbie"
 
         token = login(client, "new@example.com", "password123")
-        me = client.get("/auth/me", headers=auth_header(token))
+        me = client.get(f"{API}/auth/me", headers=auth_header(token))
         assert me.status_code == 200
         assert me.json()["email"] == "new@example.com"
 
@@ -26,7 +26,7 @@ class TestAuthFlow:
 
     def test_register_password_mismatch_is_422(self, client: TestClient) -> None:
         response = client.post(
-            "/auth/register",
+            f"{API}/auth/register",
             json={
                 "email": "mismatch@example.com",
                 "username": "mismatch",
@@ -38,7 +38,7 @@ class TestAuthFlow:
 
     def test_register_duplicate_email_is_409(self, client: TestClient) -> None:
         response = client.post(
-            "/auth/register",
+            f"{API}/auth/register",
             json={
                 "email": "admin@example.com",
                 "username": "notadmin",
@@ -50,7 +50,7 @@ class TestAuthFlow:
 
     def test_register_duplicate_username_is_409(self, client: TestClient) -> None:
         response = client.post(
-            "/auth/register",
+            f"{API}/auth/register",
             json={
                 "email": "other@example.com",
                 "username": "admin",
@@ -62,7 +62,7 @@ class TestAuthFlow:
 
     def test_login_bad_password_is_401(self, client: TestClient) -> None:
         response = client.post(
-            "/auth/login",
+            f"{API}/auth/login",
             json={"email": "admin@example.com", "password": "nope"},
         )
         assert response.status_code == 401
@@ -70,7 +70,7 @@ class TestAuthFlow:
     def test_update_profile(self, client: TestClient) -> None:
         token = login(client, "viewer@example.com", "viewer123")
         response = client.patch(
-            "/auth/me",
+            f"{API}/users/me",
             headers=auth_header(token),
             json={"display_name": "Victoria", "username": "victoria"},
         )
@@ -81,18 +81,18 @@ class TestAuthFlow:
     def test_username_taken_on_update_is_409(self, client: TestClient) -> None:
         token = login(client, "viewer@example.com", "viewer123")
         response = client.patch(
-            "/auth/me", headers=auth_header(token), json={"username": "admin"}
+            f"{API}/users/me", headers=auth_header(token), json={"username": "admin"}
         )
         assert response.status_code == 409
 
     def test_logout_invalidates_token(self, client: TestClient) -> None:
         token = login(client, "viewer@example.com", "viewer123")
         assert (
-            client.post("/auth/logout", headers=auth_header(token)).status_code
+            client.post(f"{API}/auth/logout", headers=auth_header(token)).status_code
             == 204
         )
 
-        after = client.get("/auth/me", headers=auth_header(token))
+        after = client.get(f"{API}/auth/me", headers=auth_header(token))
         assert after.status_code == 401
 
     def test_soft_delete_blocks_login(self, client: TestClient) -> None:
@@ -100,11 +100,11 @@ class TestAuthFlow:
         token = login(client, "temp@example.com", "password123")
 
         assert (
-            client.delete("/auth/me", headers=auth_header(token)).status_code == 204
+            client.delete(f"{API}/users/me", headers=auth_header(token)).status_code == 204
         )
-        assert client.get("/auth/me", headers=auth_header(token)).status_code == 401
+        assert client.get(f"{API}/auth/me", headers=auth_header(token)).status_code == 401
         relogin = client.post(
-            "/auth/login",
+            f"{API}/auth/login",
             json={"email": "temp@example.com", "password": "password123"},
         )
         assert relogin.status_code == 401
@@ -117,27 +117,27 @@ class TestRefreshFlow:
 
     def test_refresh_issues_working_access(self, client: TestClient) -> None:
         _, refresh = login_pair(client, "viewer@example.com", "viewer123")
-        response = client.post("/auth/refresh", json={"refresh_token": refresh})
+        response = client.post(f"{API}/auth/refresh", json={"refresh_token": refresh})
         assert response.status_code == 200, response.text
         new_access = response.json()["tokens"]["access_token"]
-        assert client.get("/auth/me", headers=auth_header(new_access)).status_code == 200
+        assert client.get(f"{API}/auth/me", headers=auth_header(new_access)).status_code == 200
 
     def test_old_refresh_rejected_after_rotation(self, client: TestClient) -> None:
         _, refresh = login_pair(client, "viewer@example.com", "viewer123")
-        first = client.post("/auth/refresh", json={"refresh_token": refresh})
+        first = client.post(f"{API}/auth/refresh", json={"refresh_token": refresh})
         assert first.status_code == 200
-        replay = client.post("/auth/refresh", json={"refresh_token": refresh})
+        replay = client.post(f"{API}/auth/refresh", json={"refresh_token": refresh})
         assert replay.status_code == 401
 
     def test_refresh_token_is_not_accepted_as_access(
         self, client: TestClient
     ) -> None:
         _, refresh = login_pair(client, "viewer@example.com", "viewer123")
-        assert client.get("/auth/me", headers=auth_header(refresh)).status_code == 401
+        assert client.get(f"{API}/auth/me", headers=auth_header(refresh)).status_code == 401
 
     def test_access_token_is_not_accepted_for_refresh(
         self, client: TestClient
     ) -> None:
         access, _ = login_pair(client, "viewer@example.com", "viewer123")
-        response = client.post("/auth/refresh", json={"refresh_token": access})
+        response = client.post(f"{API}/auth/refresh", json={"refresh_token": access})
         assert response.status_code == 401

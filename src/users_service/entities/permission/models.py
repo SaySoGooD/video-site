@@ -9,7 +9,7 @@ class Permission:
 
     A permission is the atomic unit of authorization. The pair
     (``resource``, ``action``) is unique across the system, e.g.
-    ("document", "read") or ("access_control", "manage").
+    ("content", "moderate") or ("users", "ban").
     """
 
     id: PermissionId
@@ -19,5 +19,5 @@ class Permission:
 
     @property
     def code(self) -> str:
-        """Human-readable identifier, e.g. ``document:read``."""
-        return f"{self.resource}:{self.action}"
+        """Human-readable identifier, e.g. ``content.read``."""
+        return f"{self.resource}.{self.action}"

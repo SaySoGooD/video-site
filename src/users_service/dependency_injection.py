@@ -5,8 +5,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from users_service.adapter.cache.null_cache import NullCache
 from users_service.adapter.cache.redis_cache import RedisCache
 from users_service.adapter.database.unit_of_work import SqlAlchemyUnitOfWork
+from users_service.adapter.email.console_email_sender import ConsoleEmailSender
+from users_service.adapter.email.smtp_email_sender import SmtpEmailSender
+from users_service.adapter.rate_limit.in_memory_rate_limiter import (
+    InMemoryRateLimiter,
+)
+from users_service.adapter.rate_limit.redis_rate_limiter import RedisRateLimiter
 from users_service.adapter.security.argon2_password_hasher import (
     Argon2PasswordHasher,
+)
+from users_service.adapter.security.one_time_token_service import (
+    Sha256OneTimeTokenService,
 )
 from users_service.adapter.security.password_hasher import PBKDF2PasswordHasher
 from users_service.adapter.security.token_service import JwtTokenService
@@ -40,11 +49,17 @@ from users_service.application.access_control.usecases.revoke_permission_from_ro
 from users_service.application.access_control.usecases.revoke_role_from_user_usecase import (  # noqa: E501
     RevokeRoleFromUserUseCase,
 )
+from users_service.application.auth.services.email_verification_issuer import (
+    EmailVerificationIssuer,
+)
 from users_service.application.auth.usecases.authenticate_usecase import (
     AuthenticateUseCase,
 )
 from users_service.application.auth.usecases.delete_user_usecase import (
     DeleteUserUseCase,
+)
+from users_service.application.auth.usecases.forgot_password_usecase import (
+    ForgotPasswordUseCase,
 )
 from users_service.application.auth.usecases.login_usecase import LoginUseCase
 from users_service.application.auth.usecases.logout_usecase import LogoutUseCase
@@ -54,14 +69,23 @@ from users_service.application.auth.usecases.refresh_token_usecase import (
 from users_service.application.auth.usecases.register_user_usecase import (
     RegisterUserUseCase,
 )
+from users_service.application.auth.usecases.reset_password_usecase import (
+    ResetPasswordUseCase,
+)
 from users_service.application.auth.usecases.update_user_usecase import (
     UpdateUserUseCase,
+)
+from users_service.application.auth.usecases.verify_email_usecase import (
+    VerifyEmailUseCase,
 )
 from users_service.application.users.usecases.get_user_profile_usecase import (
     GetUserProfileUseCase,
 )
 from users_service.application.users.usecases.list_user_sessions_usecase import (
     ListUserSessionsUseCase,
+)
+from users_service.application.users.usecases.revoke_all_sessions_usecase import (
+    RevokeAllSessionsUseCase,
 )
 from users_service.application.users.usecases.revoke_user_session_usecase import (
     RevokeUserSessionUseCase,
@@ -73,9 +97,9 @@ class Container(containers.DeclarativeContainer):
     """Application dependency injection container.
 
     Singletons hold process-wide resources (config, DB engine, hasher, token
-    service). The unit of work is a ``Factory`` so every use case resolution
-    gets a fresh transaction; use cases are ``Factory`` too and receive that
-    unit of work.
+    service, limiter). The unit of work is a ``Factory`` so every use case
+    resolution gets a fresh transaction; use cases are ``Factory`` too and
+    receive that unit of work.
     """
 
     config: providers.Singleton[Config] = providers.Singleton(Config)
@@ -100,8 +124,10 @@ class Container(containers.DeclarativeContainer):
         pbkdf2=providers.Singleton(PBKDF2PasswordHasher),
     )
 
-    _cache_backend = providers.Callable(
-        lambda url: "redis" if url else "null",
+    one_time_token_service = providers.Singleton(Sha256OneTimeTokenService)
+
+    _redis_backend = providers.Callable(
+        lambda url: "redis" if url else "memory",
         config.provided.REDIS_URL,
     )
     redis_client = providers.Singleton(
@@ -110,9 +136,28 @@ class Container(containers.DeclarativeContainer):
         decode_responses=True,
     )
     cache = providers.Selector(
-        _cache_backend,
+        _redis_backend,
         redis=providers.Singleton(RedisCache, client=redis_client),
-        null=providers.Singleton(NullCache),
+        memory=providers.Singleton(NullCache),
+    )
+    rate_limiter = providers.Selector(
+        _redis_backend,
+        redis=providers.Singleton(RedisRateLimiter, client=redis_client),
+        memory=providers.Singleton(InMemoryRateLimiter),
+    )
+
+    email_sender = providers.Selector(
+        config.provided.EMAIL_BACKEND,
+        console=providers.Singleton(ConsoleEmailSender),
+        smtp=providers.Singleton(
+            SmtpEmailSender,
+            host=config.provided.SMTP_HOST,
+            port=config.provided.SMTP_PORT,
+            username=config.provided.SMTP_USERNAME,
+            password=config.provided.SMTP_PASSWORD,
+            sender=config.provided.EMAIL_FROM,
+            use_tls=config.provided.SMTP_USE_TLS,
+        ),
     )
 
     token_service = providers.Singleton(
@@ -123,14 +168,31 @@ class Container(containers.DeclarativeContainer):
         refresh_expire_minutes=config.provided.REFRESH_TOKEN_EXPIRE_MINUTES,
     )
 
+    email_verification_issuer = providers.Factory(
+        EmailVerificationIssuer,
+        one_time_tokens=one_time_token_service,
+        email_sender=email_sender,
+        url_template=config.provided.EMAIL_VERIFICATION_URL,
+        ttl_hours=config.provided.EMAIL_VERIFICATION_TTL_HOURS,
+    )
+
     register_user_usecase = providers.Factory(
         RegisterUserUseCase,
         uow=uow,
         hasher=password_hasher,
+        verification=email_verification_issuer,
+        limiter=rate_limiter,
+        ip_policy=config.provided.register_ip_policy,
         default_role_name=config.provided.DEFAULT_ROLE_NAME,
     )
     login_usecase = providers.Factory(
-        LoginUseCase, uow=uow, hasher=password_hasher, token_service=token_service
+        LoginUseCase,
+        uow=uow,
+        hasher=password_hasher,
+        token_service=token_service,
+        limiter=rate_limiter,
+        ip_policy=config.provided.login_ip_policy,
+        account_policy=config.provided.login_account_policy,
     )
     logout_usecase = providers.Factory(
         LogoutUseCase, uow=uow, token_service=token_service
@@ -146,16 +208,48 @@ class Container(containers.DeclarativeContainer):
         cache_ttl_seconds=config.provided.AUTH_CACHE_TTL_SECONDS,
     )
     update_user_usecase = providers.Factory(
-        UpdateUserUseCase, uow=uow, cache=cache
+        UpdateUserUseCase,
+        uow=uow,
+        cache=cache,
+        verification=email_verification_issuer,
     )
     delete_user_usecase = providers.Factory(
         DeleteUserUseCase, uow=uow, cache=cache
+    )
+    verify_email_usecase = providers.Factory(
+        VerifyEmailUseCase,
+        uow=uow,
+        one_time_tokens=one_time_token_service,
+        cache=cache,
+    )
+    forgot_password_usecase = providers.Factory(
+        ForgotPasswordUseCase,
+        uow=uow,
+        one_time_tokens=one_time_token_service,
+        email_sender=email_sender,
+        limiter=rate_limiter,
+        email_policy=config.provided.forgot_password_email_policy,
+        ip_policy=config.provided.forgot_password_ip_policy,
+        reset_url_template=config.provided.PASSWORD_RESET_URL,
+        reset_ttl_minutes=config.provided.PASSWORD_RESET_TTL_MINUTES,
+    )
+    reset_password_usecase = providers.Factory(
+        ResetPasswordUseCase,
+        uow=uow,
+        hasher=password_hasher,
+        one_time_tokens=one_time_token_service,
+        cache=cache,
+        limiter=rate_limiter,
+        ip_policy=config.provided.reset_password_ip_policy,
     )
 
     get_user_profile_usecase = providers.Factory(GetUserProfileUseCase, uow=uow)
     list_user_sessions_usecase = providers.Factory(ListUserSessionsUseCase, uow=uow)
     revoke_user_session_usecase = providers.Factory(
         RevokeUserSessionUseCase, uow=uow
+    )
+    revoke_all_sessions_usecase = providers.Factory(
+        RevokeAllSessionsUseCase, uow=uow
     )
 
     list_roles_usecase = providers.Factory(ListRolesUseCase, uow=uow)

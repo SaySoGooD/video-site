@@ -2,7 +2,7 @@ from collections.abc import Iterator
 
 import fakeredis.aioredis
 import pytest
-from conftest import _build_client, auth_header, login, register
+from conftest import API, _build_client, auth_header, login, register
 from dependency_injector import providers
 from fastapi.testclient import TestClient
 
@@ -31,8 +31,8 @@ class TestCachingWithRedis:
     def test_auth_still_works_with_cache(self, cached_client: TestClient) -> None:
         headers = auth_header(login(cached_client, "viewer@example.com", "viewer123"))
         # First call populates the cache, second call serves from it.
-        assert cached_client.get("/auth/me", headers=headers).status_code == 200
-        assert cached_client.get("/auth/me", headers=headers).status_code == 200
+        assert cached_client.get(f"{API}/auth/me", headers=headers).status_code == 200
+        assert cached_client.get(f"{API}/auth/me", headers=headers).status_code == 200
 
     def test_role_grant_invalidates_cache(self, cached_client: TestClient) -> None:
         admin = auth_header(login(cached_client, "admin@example.com", "admin123"))
@@ -41,25 +41,25 @@ class TestCachingWithRedis:
         user = auth_header(login(cached_client, "cached@example.com", "password123"))
 
         # Caches the user with only the default (permission-less) role.
-        assert cached_client.get("/admin/users", headers=user).status_code == 403
+        assert cached_client.get(f"{API}/admin/users", headers=user).status_code == 403
 
-        roles = cached_client.get("/admin/roles", headers=admin).json()
+        roles = cached_client.get(f"{API}/admin/roles", headers=admin).json()
         admin_role_id = next(r["id"] for r in roles if r["name"] == "admin")
         granted = cached_client.post(
-            f"/admin/users/{created['id']}/roles",
+            f"{API}/admin/users/{created['id']}/roles",
             headers=admin,
             json={"role_id": admin_role_id},
         )
         assert granted.status_code == 200, granted.text
 
         # Cache was invalidated on grant -> the new role is visible immediately.
-        assert cached_client.get("/admin/users", headers=user).status_code == 200
+        assert cached_client.get(f"{API}/admin/users", headers=user).status_code == 200
 
     def test_logout_is_immediate_despite_cache(
         self, cached_client: TestClient
     ) -> None:
         headers = auth_header(login(cached_client, "viewer@example.com", "viewer123"))
-        assert cached_client.get("/auth/me", headers=headers).status_code == 200
-        cached_client.post("/auth/logout", headers=headers)
+        assert cached_client.get(f"{API}/auth/me", headers=headers).status_code == 200
+        cached_client.post(f"{API}/auth/logout", headers=headers)
         # The session is checked in the DB every request, so logout is not cached.
-        assert cached_client.get("/auth/me", headers=headers).status_code == 401
+        assert cached_client.get(f"{API}/auth/me", headers=headers).status_code == 401

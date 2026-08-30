@@ -1,0 +1,64 @@
+# Local stack: API + PostgreSQL + Redis.
+#
+# The API waits for both dependencies to report healthy, then applies the
+# Alembic migrations before serving — so a fresh checkout comes up with the
+# right schema and no manual step.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-users_service}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Not published to the host by default: the API reaches it over the
+    # compose network, and a database on 0.0.0.0:5432 is how servers get owned.
+    expose:
+      - "5432"
+
+  redis:
+    image: redis:7-alpine
+    # Rate limits and the auth cache live here. Data is disposable, so no
+    # volume: a restart costs a few extra database reads, nothing more.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    expose:
+      - "6379"
+
+  api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: ${DB_NAME:-users_service}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      SEED_ON_STARTUP: ${SEED_ON_STARTUP:-false}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-[]}
+    ports:
+      - "${API_PORT:-8001}:8001"
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn users_service.bootstrap:bootstrap --factory
+             --host 0.0.0.0 --port 8001"
+
+volumes:
+  postgres_data:

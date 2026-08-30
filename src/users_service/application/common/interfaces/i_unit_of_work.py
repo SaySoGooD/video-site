@@ -1,13 +1,19 @@
 from abc import ABC, abstractmethod
 from types import TracebackType
 
-from users_service.application.common.interfaces.repositories.i_permission_repository import (
+from users_service.application.common.interfaces.repositories.i_audit_log_repository import (  # noqa: E501
+    IAuditLogRepository,
+)
+from users_service.application.common.interfaces.repositories.i_permission_repository import (  # noqa: E501
     IPermissionRepository,
 )
 from users_service.application.common.interfaces.repositories.i_role_repository import (
     IRoleRepository,
 )
-from users_service.application.common.interfaces.repositories.i_session_repository import (
+from users_service.application.common.interfaces.repositories.i_security_token_repository import (  # noqa: E501
+    ISecurityTokenRepository,
+)
+from users_service.application.common.interfaces.repositories.i_session_repository import (  # noqa: E501
     ISessionRepository,
 )
 from users_service.application.common.interfaces.repositories.i_user_repository import (
@@ -28,6 +34,8 @@ class IUnitOfWork(ABC):
     roles: IRoleRepository
     permissions: IPermissionRepository
     sessions: ISessionRepository
+    security_tokens: ISecurityTokenRepository
+    audit_log: IAuditLogRepository
 
     @abstractmethod
     async def __aenter__(self) -> "IUnitOfWork":

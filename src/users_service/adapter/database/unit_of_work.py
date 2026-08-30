@@ -2,11 +2,17 @@ from types import TracebackType
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from users_service.adapter.database.repositories.audit_log_repository import (
+    SqlAlchemyAuditLogRepository,
+)
 from users_service.adapter.database.repositories.permission_repository import (
     SqlAlchemyPermissionRepository,
 )
 from users_service.adapter.database.repositories.role_repository import (
     SqlAlchemyRoleRepository,
+)
+from users_service.adapter.database.repositories.security_token_repository import (
+    SqlAlchemySecurityTokenRepository,
 )
 from users_service.adapter.database.repositories.session_repository import (
     SqlAlchemySessionRepository,
@@ -36,6 +42,8 @@ class SqlAlchemyUnitOfWork(IUnitOfWork):
         self.roles = SqlAlchemyRoleRepository(self._session)
         self.permissions = SqlAlchemyPermissionRepository(self._session)
         self.sessions = SqlAlchemySessionRepository(self._session)
+        self.security_tokens = SqlAlchemySecurityTokenRepository(self._session)
+        self.audit_log = SqlAlchemyAuditLogRepository(self._session)
         return self
 
     async def __aexit__(

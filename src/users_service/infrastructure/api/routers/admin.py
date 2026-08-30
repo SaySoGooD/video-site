@@ -50,7 +50,7 @@ from users_service.infrastructure.api.serializers import to_user_response
 router = APIRouter(
     prefix="/admin",
     tags=["access-control (admin)"],
-    dependencies=[Depends(require_permission("access_control", "manage"))],
+    dependencies=[Depends(require_permission("users", "manage"))],
 )
 
 

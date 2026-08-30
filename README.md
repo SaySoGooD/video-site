@@ -1,6 +1,10 @@
-# users-service
+# video-site
 
-The account service of a video site. It answers exactly one question —
+The backend of a video site. Right now it contains one service.
+
+## users-service
+
+It answers exactly one question —
 
 ```
 WHO IS THIS USER?
@@ -31,18 +35,18 @@ analytics is issue and store a **`visitor_id`** — see below.
 ## Tech stack
 
 - Python 3.12+, FastAPI, uvicorn
-- SQLAlchemy 2.0 (async) + PostgreSQL (asyncpg driver)
+- SQLAlchemy 2.0 (async) + PostgreSQL (asyncpg), schema managed by Alembic
 - PyJWT for stateless access + refresh tokens
 - Argon2id password hashing (argon2-cffi), PBKDF2 available as an alternative
-- Optional Redis cache (falls back to a no-op cache when unset)
+- Redis for the auth cache and rate limiting
 - dependency-injector for composition
 - pydantic / pydantic-settings for schemas & config
 
 ## Authentication for a browser: HttpOnly cookies, not localStorage
 
-The token model is unchanged — a short-lived **access token**, a long-lived
+The token model is the usual one — a short-lived **access token**, a long-lived
 **refresh token**, and a server-side **session** row whose `jti` both tokens
-carry so either can be revoked. What changed is *where the browser keeps them*:
+carry so either can be revoked. What matters is *where the browser keeps them*:
 
 ```
 Browser
@@ -58,192 +62,241 @@ users-service
 - `POST /auth/login` sets `access_token` and `refresh_token` as **HttpOnly,
   Secure, SameSite** cookies. They are deliberately **absent from the response
   body** — a script on the page (including an injected one) cannot read them.
-- The refresh cookie is scoped to `REFRESH_COOKIE_PATH` (`/auth`), so ordinary
-  API requests never carry it.
+- The refresh cookie is scoped to `REFRESH_COOKIE_PATH`, so ordinary API
+  requests never carry it.
 - Because the browser now sends credentials on its own, unsafe requests are
   verified with a **double-submit CSRF token**: login returns `csrf_token` and
   sets it as a *readable* cookie; the frontend echoes it in the
   `X-CSRF-Token` header. Mismatch ⇒ **403**. A foreign site can make the
   browser send a cookie, but cannot read one.
+- Refresh **rotates**: the presented session is revoked and a new one issued in
+  the same transaction, so a stolen refresh token replayed after the real
+  client has refreshed fails with 401 and surfaces the theft.
 - Set `COOKIE_AUTH_ENABLED=false` for non-browser clients (mobile, another
-  service): then `login`/`refresh` return the tokens in the body and the
-  client sends `Authorization: Bearer <token>`. Both modes are always accepted
-  on the read path; the cookie wins when both are present.
+  service): `login`/`refresh` then return the tokens in the body and the client
+  sends `Authorization: Bearer <token>`. Both are accepted on the read path;
+  the cookie wins when both are present.
 
 ## visitor_id — the seam to analytics
 
-Every visitor, logged in or not, is issued an opaque `visitor_id` cookie on
-first contact (UUID v4, 400 days — the browser maximum). It is **not a
-credential**: it identifies a browser, not a person.
+Every visitor gets an opaque `visitor_id` cookie on first contact — issued by
+middleware, so it is handed out on *every* response, including 401s and 404s.
+It exists **before** there is a user, which is the whole point:
 
-- `POST /auth/register` records the current `visitor_id` on the new account, so
-  the visitor's pre-signup activity can be attributed once they sign up.
-- Every login session stores the `visitor_id` it was created from.
-- `GET /auth/me` returns it to the owner, which is how a frontend passes it to
+```
+anonymous visitor
+       │
+       ▼
+visitor_id = UUID
+       │
+       ├── page views
+       ├── content views
+       └── sessions
+       │
+       ▼
+     REGISTER
+       │
+       ▼
+   user_id = 123
+```
+
+`visitor_id ≠ user_id`. It identifies a browser, not a person, and is never a
+credential — nothing is authorized on the strength of it.
+
+- `POST /auth/register` records the current `visitor_id` on the new account,
+  which is what ties pre-signup activity to it.
+- Every login session stores the `visitor_id` it was created from, so one
+  account accumulates the browsers it has been used from.
+- `GET /users/me` returns it to the owner; that is how a frontend passes it to
   Matomo (as a custom dimension) or to the event collector.
 - It never appears on a public profile.
 
-Analytics stays outside this service: it reads the link, this service never
-reports events.
+## Account security
 
-## Access-control model (database schema)
+| Concern | How it is handled |
+|---|---|
+| Password storage | Argon2id, salt and parameters embedded in the hash |
+| Brute force | Per-IP **and** per-account counters — a botnet spread over thousands of IPs still cannot grind one account |
+| Lockout | Exceeding the per-account limit locks it for the rest of the window (default 5 / 15 min); a successful login clears the counter |
+| Email verification | One-time token, **stored only as a SHA-256 hash**; changing the email un-verifies the account and re-sends |
+| Password reset | Same token machinery, 30-minute expiry, single use — and completing it **revokes every session** |
+| Enumeration | Bad password and unknown account return the same 401; `forgot-password` answers identically for known and unknown addresses |
+| Audit | Every event below is appended in the same transaction as the action it records |
 
-Classic RBAC: **users → roles → permissions**. A permission is the atomic rule
-"may perform *action* on *resource*". Users never hold permissions directly —
-only through roles.
-
-| Table              | Purpose | Key columns |
-|--------------------|---------|-------------|
-| `users`            | Accounts. `email` is private, `username` is the public handle. `is_active=False` is the *soft-delete* state; `is_superuser` bypasses all permission checks. `visitor_id` is the browser the account was created from. | `id` PK, `email` UNIQUE, `username` UNIQUE |
-| `roles`            | Named bundles of permissions. | `id` PK, `name` UNIQUE |
-| `permissions`      | Atomic rules — a `(resource, action)` pair, e.g. `account:read`. | `id` PK, UNIQUE `(resource, action)` |
-| `user_roles`       | Many-to-many: which roles a user has. | composite PK `(user_id, role_id)` |
-| `role_permissions` | Many-to-many: which permissions a role grants. | composite PK `(role_id, permission_id)` |
-| `sessions`         | Server-side login records, one per device. Each issued JWT carries a `jti` pointing here so a token can be **revoked** (logout / soft-delete / refresh rotation). Also stores `visitor_id`, `user_agent`, `ip_address`, `last_used_at` for the "your devices" screen. | `id` PK, `jti` UNIQUE |
-
-### How a request is decided
-
-1. Take the access token from the auth cookie, or from `Authorization: Bearer`.
-2. **No/invalid token or revoked/expired session → 401** (`AuthenticationError`).
-3. Load the user (with roles + permissions). Inactive user → 401.
-4. The route declares a required permission, e.g. `require_permission("account","read")`.
-5. `User.has_permission(resource, action)` = superuser **or** any role grants it.
-   - Granted → **200**; not granted → **403** (`AuthorizationError`).
-
-### ACID
-
-Each use case runs inside one **unit of work** (`SqlAlchemyUnitOfWork`) wrapping
-a single database transaction. All repositories share it, so a use case's
-writes commit or roll back together. Registration inserts the account *and*
-grants the default role in one commit; soft-delete deactivates the user *and*
-revokes every session in one commit; refresh revokes the old session *and*
-writes the new one in one commit. Uniqueness of `email`, `username` and
-`(resource, action)` is enforced by database constraints.
-
-### Passwords
-
-Stored only as salted hashes; plaintext is never persisted. The scheme is
-chosen by `PASSWORD_HASHER` behind the `IPasswordHasher` port: **`argon2`**
-(default, memory-hard Argon2id) or **`pbkdf2`** (PBKDF2-HMAC-SHA256, stdlib).
-Switching the scheme means existing hashes of the other format no longer verify.
-
-### Caching (optional)
-
-If `REDIS_URL` is set, the authenticated user (with roles/permissions) is cached
-to avoid a join on every request; otherwise a no-op cache is used. Security is
-unaffected: the session is validated against the database on **every** request
-(logout / soft-delete are immediate), and a user's cache entry is invalidated
-when their roles or profile change.
+Audit actions: `REGISTER`, `LOGIN`, `LOGIN_FAILED`, `LOGOUT`,
+`PASSWORD_CHANGED`, `PASSWORD_RESET`, `EMAIL_VERIFIED`, `SESSION_REVOKED`,
+`USER_BANNED`.
 
 ## API
 
+Everything below is mounted under `API_PREFIX` (`/api/v1`). Health probes are
+unversioned.
+
 ### Auth
 - `POST /auth/register` — email/username/password/password_repeat → 201 with the
-  new profile (409 duplicate email or username, 422 password mismatch)
-- `POST /auth/login` — email + password → sets cookies, returns
-  `{ user, csrf_token, tokens: null }` (or the tokens, in token mode); 401 on bad creds
-- `POST /auth/refresh` — rotates the session; token from the cookie or the body
-- `POST /auth/logout` — revoke the session and clear the cookies (204)
-- `GET /auth/me` — the owner's view of the account
-- `PATCH /auth/me` — update own profile (username / display name / email)
-- `DELETE /auth/me` — **soft-delete**: `is_active=False` + revoke sessions (204)
+  profile; mails a verification link (409 duplicate, 422 mismatch, 429 flood)
+- `POST /auth/login` — → sets cookies, returns `{ user, csrf_token, tokens: null }`
+  (or the tokens in token mode); 401 bad creds, 429 locked out
+- `POST /auth/refresh` — rotates the session; token from cookie or body
+- `POST /auth/logout` — revoke this session, clear the cookies (204)
+- `GET  /auth/me` — the caller's account
+- `GET  /auth/verify-email?token=…` — confirm an address (400 if spent/expired)
+- `POST /auth/forgot-password` — mail a reset link; always the same answer
+- `POST /auth/reset-password` — set a new password, sign every device out
 
 ### Users
-- `GET /users/{id}` — public profile: id, username, display name, created_at.
-  Unauthenticated; 404 for missing or soft-deleted accounts
-- `PATCH /users/me` — same as `PATCH /auth/me`
-- `GET /users/me/sessions` — the caller's live logins, `current: true` on the one
-  the request is using
-- `DELETE /users/me/sessions/{id}` — sign that device out (404 if not the caller's)
+- `GET    /users/me` — own account (email, verification state, roles, permissions)
+- `PATCH  /users/me` — update username / display name / email
+- `DELETE /users/me` — soft-delete: deactivate + revoke every session (204)
+- `GET    /users/me/sessions` — live logins, `current: true` on this one
+- `DELETE /users/me/sessions/{id}` — sign that device out (404 if not yours)
+- `DELETE /users/me/sessions?keep_current=true` — log out from all devices;
+  `keep_current` spares the caller's own
+- `GET    /users/{id}` — public profile: id, username, display name, created_at
 
-### Access-control admin API — requires `access_control:manage`
+### Admin — requires `users.manage`
 - `GET/POST /admin/permissions`
 - `GET/POST /admin/roles`, `DELETE /admin/roles/{id}`
 - `POST /admin/roles/{id}/permissions`, `DELETE /admin/roles/{id}/permissions/{pid}`
 - `GET /admin/users`
 - `POST /admin/users/{id}/roles`, `DELETE /admin/users/{id}/roles/{rid}`
 
+### Probes
+- `GET /health` — liveness: the process is up, nothing else is touched
+- `GET /health/ready` — readiness: 503 if the database is unreachable
+
+## Data model
+
+Classic RBAC: **users → roles → permissions**. Users never hold permissions
+directly — only through roles.
+
+| Table | Purpose |
+|---|---|
+| `users` | Accounts. `email` private, `username` the public handle. `is_active=False` is the soft-delete state, `email_verified_at` the confirmation timestamp, `visitor_id` the browser it signed up from |
+| `roles`, `permissions` | The RBAC vocabulary; a permission is a `(resource, action)` pair rendered as `content.read` |
+| `user_roles`, `role_permissions` | Many-to-many links, pure keys |
+| `sessions` | One row per login per device: `jti`, expiry, `revoked_at`, plus `visitor_id`, `user_agent`, `ip_address`, `device`, `last_seen_at` |
+| `security_tokens` | One-time email/reset secrets, stored as hashes with `purpose` and `used_at` |
+| `audit_logs` | Append-only security events with JSON metadata |
+
+**Session status is derived, never stored**: `revoked_at` and `expires_at`
+decide whether a session is active, expired or revoked, so the two can never
+disagree.
+
+### ACID
+
+Each use case runs inside one unit of work wrapping a single transaction.
+Registration inserts the account, grants the default role, mints the
+verification token and writes the audit row together. A password reset changes
+the hash, spends the token, revokes the sessions and records the event
+together. The verification email is sent *after* the commit — mail is the one
+step that can fail slowly, and a signup must not be rolled back because a mail
+server hiccuped.
+
 ## Seeded demo data
 
-On startup (`SEED_ON_STARTUP=true`) the schema is created and demo data is
-inserted **if the database is empty**.
+With `SEED_ON_STARTUP=true` the schema is created and demo data inserted if the
+database is empty.
 
-Permissions: `account:read`, `account:moderate`, `access_control:manage`.
+Permissions: `content.read`, `content.moderate`, `users.read`, `users.ban`,
+`users.manage`.
 
-| Role        | Permissions |
-|-------------|-------------|
-| `admin`     | all (the seeded admin user is also `is_superuser`) |
-| `moderator` | account read/moderate |
-| `user`      | none — the default role every signup receives |
+| Role | Permissions |
+|---|---|
+| `admin` | all (the seeded admin is also `is_superuser`) |
+| `moderator` | content read/moderate, users read/ban |
+| `user` | `content.read` — the default role every signup receives |
 
-| User                    | Username    | Password       | Role      |
-|-------------------------|-------------|----------------|-----------|
-| `admin@example.com`     | `admin`     | `admin123`     | admin     |
+| User | Username | Password | Role |
+|---|---|---|---|
+| `admin@example.com` | `admin` | `admin123` | admin |
 | `moderator@example.com` | `moderator` | `moderator123` | moderator |
-| `viewer@example.com`    | `viewer`    | `viewer123`    | user      |
+| `viewer@example.com` | `viewer` | `viewer123` | user |
 
 ## Architecture
 
-Layered (clean) architecture; dependencies point inward only. The codebase
-follows a strict **one class per file** rule — related classes are grouped in a
-folder rather than a single module (small DTOs/pydantic models are the only
-exception). Application ports are `ABC`s implemented by the adapters.
+Layered (clean) architecture; dependencies point inward only. One class per
+file — related classes are grouped in a folder rather than a module (small
+DTOs and pydantic models are the exception). Application ports are `ABC`s
+implemented by adapters.
 
 ```
 src/users_service/
-├── entities/                   # Domain: User, Role, Permission, AuthSession
-│   └── <entity>/               #   models.py + value_objects.py per entity
+├── entities/                   # User, Role, Permission, AuthSession,
+│                               # SecurityToken, AuditEvent
 ├── application/                # Use cases + ports (ABCs)
-│   ├── common/
-│   │   ├── errors.py           #   application error hierarchy
-│   │   ├── dto.py              #   small input/output DTOs
-│   │   └── interfaces/
-│   │       ├── security/       #   i_password_hasher, i_token_service (+ token DTOs)
-│   │       ├── repositories/   #   one repository ABC per file
-│   │       └── i_unit_of_work.py
-│   ├── auth/                   #   register, login, refresh, logout, authenticate,
-│   │                           #   update profile, soft-delete
-│   ├── users/                  #   public profile, own sessions, revoke a session
+│   ├── common/                 #   errors, DTOs, audit helper, rate policy
+│   ├── auth/                   #   register, login, refresh, logout, verify,
+│   │                           #   forgot/reset password, profile, delete
+│   ├── users/                  #   public profile, sessions, revoke (one/all)
 │   └── access_control/         #   roles & permissions administration
 ├── adapter/
 │   ├── database/               #   ORM models, mappers, repositories, UoW, seed
-│   ├── security/               #   Argon2 + PBKDF2 hashers, JWT token service
+│   ├── security/               #   Argon2/PBKDF2, JWT, one-time tokens
+│   ├── email/                  #   console + SMTP senders
+│   ├── rate_limit/             #   Redis + in-process limiters
 │   └── cache/                  #   NullCache + RedisCache
 ├── infrastructure/
-│   ├── api/
-│   │   ├── routers/            #   auth, users, admin, health
-│   │   ├── models/             #   request/response schemas
-│   │   ├── cookies.py          #   HttpOnly session + visitor cookies
-│   │   ├── csrf_middleware.py  #   double-submit CSRF check
-│   │   ├── dependencies.py     #   401/403 gates, device info
-│   │   └── exc_handlers.py     #   application errors -> HTTP status codes
-│   └── config.py               #   pydantic-settings Config
-├── dependency_injection.py     # DI container
-├── bootstrap.py                # Composition root: app factory + lifespan
-└── __main__.py                 # Entry point
+│   ├── api/                    #   routers, schemas, cookies, CSRF + visitor
+│   │                           #   middleware, dependencies, error mapping
+│   └── config.py               #   settings + production safety checks
+├── dependency_injection.py
+└── bootstrap.py
 ```
 
-The application layer depends only on **ports** (`IUserRepository`,
-`ISessionRepository`, `IUnitOfWork`, `IPasswordHasher`, `ITokenService` — all
-`ABC`s in `i_*.py` files). SQLAlchemy, PyJWT and FastAPI live behind
+SQLAlchemy, PyJWT, Redis, smtplib and FastAPI all live behind
 adapters/infrastructure and never leak inward.
 
 ## Quick start
 
+Docker, everything included:
+
 ```bash
-cp .env.example .env      # set DB_* and JWT_SECRET
+cp .env.example .env
+```
+
+```bash
+docker compose up --build
+```
+
+Compose waits for PostgreSQL and Redis to report healthy, applies the Alembic
+migrations, then serves on http://localhost:8001/docs.
+
+Without Docker:
+
+```bash
 uv sync
+```
+
+```bash
+uv run alembic upgrade head
+```
+
+```bash
 uv run python -m users_service
 ```
 
-Open http://localhost:8001/docs
+Log in and use the cookie jar:
 
 ```bash
-curl -c jar -X POST http://localhost:8001/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"admin@example.com","password":"admin123"}'
+curl -c jar -X POST http://localhost:8001/api/v1/auth/login -H "Content-Type: application/json" -d '{"email":"admin@example.com","password":"admin123"}'
+```
 
-curl -b jar http://localhost:8001/auth/me
+```bash
+curl -b jar http://localhost:8001/api/v1/users/me
+```
+
+## Migrations
+
+Alembic owns the schema. `SEED_ON_STARTUP` is a development convenience and is
+refused in production, so the two never both create tables.
+
+```bash
+uv run alembic revision --autogenerate -m "what changed"
+```
+
+```bash
+uv run alembic upgrade head
 ```
 
 ## Tests
@@ -252,17 +305,29 @@ curl -b jar http://localhost:8001/auth/me
 uv run pytest -q
 ```
 
-`test/unit_tests/` covers pure logic (password hashing, token service, domain
-permission checks). `test/integration_tests/` runs the full stack — DI
-container, unit of work, repositories, use cases, routers — against an
-in-memory SQLite database, so only the DB engine is swapped and PostgreSQL is
-not needed for a test run. Both auth modes are exercised: `client` (bearer
-tokens) and `browser` (HttpOnly cookies + CSRF).
+`test/unit_tests/` covers pure logic (hashers, token service, rate limiter,
+domain permissions, production config validation). `test/integration_tests/`
+runs the full stack — container, unit of work, repositories, use cases,
+routers — against in-memory SQLite, so no PostgreSQL or Redis is needed for a
+test run. Both auth modes are exercised: `client` (bearer) and `browser`
+(cookies + CSRF), and a recording email sender lets tests read verification and
+reset links the way a user would read their inbox.
+
+## Production checklist
+
+`ENVIRONMENT=production` refuses to start unless all of these hold, because
+every one of them is silent at runtime:
+
+- `JWT_SECRET` set and at least 32 characters
+- `COOKIE_SECURE=true` and `CSRF_PROTECTION=true` (with cookie auth)
+- `EMAIL_BACKEND=smtp` — otherwise reset links go to the log
+- `RATE_LIMIT_ENABLED=true` and `REDIS_URL` set, so limits hold across workers
+- `SEED_ON_STARTUP=false`
 
 ## Not built yet
 
-Deliberately left for later milestones: email verification, password reset,
-login rate limiting / lockout, and audit events.
+Two-factor auth, admin-driven bans (the action is in the audit vocabulary, the
+endpoint is not), and account deletion beyond soft-delete.
 
 ## License
 

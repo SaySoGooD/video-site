@@ -18,6 +18,7 @@ def user_to_entity(row: UserORM) -> User:
         display_name=row.display_name,
         is_active=row.is_active,
         is_superuser=row.is_superuser,
+        email_verified_at=row.email_verified_at,
         visitor_id=(
             VisitorId(row.visitor_id) if row.visitor_id is not None else None
         ),

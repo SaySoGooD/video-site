@@ -11,9 +11,17 @@ class SessionSummary(BaseModel):
     """
 
     id: int
+    status: str
     created_at: datetime
     expires_at: datetime
-    last_used_at: datetime | None = None
+    last_seen_at: datetime | None = None
     user_agent: str | None = None
     ip_address: str | None = None
+    device: str | None = None
     current: bool = False
+
+
+class RevokedSessionsResponse(BaseModel):
+    """How many devices a bulk sign-out actually knocked offline."""
+
+    revoked: int

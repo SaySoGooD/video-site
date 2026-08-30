@@ -19,6 +19,10 @@ class UserORM(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # Browser this account signed up from; the join key for analytics.
     visitor_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True, index=True

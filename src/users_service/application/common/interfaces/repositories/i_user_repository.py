@@ -39,6 +39,15 @@ class IUserRepository(ABC):
         ...
 
     @abstractmethod
+    async def update_password(self, user: User) -> None:
+        """Persist only the password hash.
+
+        Separate from :meth:`update` so a profile edit can never carry a
+        password change with it, and vice versa.
+        """
+        ...
+
+    @abstractmethod
     async def assign_role(self, user_id: UserId, role_id: RoleId) -> None:
         """Grant a role to a user (idempotent)."""
         ...

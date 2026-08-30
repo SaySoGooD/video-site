@@ -24,6 +24,7 @@ class SqlAlchemyUserRepository(IUserRepository):
             display_name=user.display_name,
             is_active=user.is_active,
             is_superuser=user.is_superuser,
+            email_verified_at=user.email_verified_at,
             visitor_id=user.visitor_id,
         )
         self._session.add(row)
@@ -64,11 +65,19 @@ class SqlAlchemyUserRepository(IUserRepository):
         row.display_name = user.display_name
         row.is_active = user.is_active
         row.is_superuser = user.is_superuser
+        row.email_verified_at = user.email_verified_at
         await self._session.flush()
         await self._session.refresh(
             row, attribute_names=["created_at", "updated_at", "roles"]
         )
         return user_to_entity(row)
+
+    async def update_password(self, user: User) -> None:
+        row = await self._session.get(UserORM, int(user.id))
+        if row is None:
+            raise ValueError(f"User {user.id} disappeared during update")
+        row.password_hash = user.password_hash
+        await self._session.flush()
 
     async def assign_role(self, user_id: UserId, role_id: RoleId) -> None:
         exists = await self._session.execute(

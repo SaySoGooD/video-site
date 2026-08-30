@@ -26,3 +26,15 @@ class IssuedToken:
     token: str
     jti: str
     expires_at: datetime
+
+
+@dataclass
+class GeneratedSecret:
+    """A freshly minted one-time secret and the hash to store for it.
+
+    ``plain`` leaves the service exactly once, in an email; only ``hashed``
+    is ever persisted.
+    """
+
+    plain: str
+    hashed: str

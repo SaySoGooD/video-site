@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -9,9 +10,15 @@ from users_service.adapter.database.seed import create_schema, seed_demo_data
 from users_service.dependency_injection import Container
 from users_service.infrastructure.api.csrf_middleware import CsrfMiddleware
 from users_service.infrastructure.api.exc_handlers import map_exc_handlers
-from users_service.infrastructure.api.routers import WIRED_MODULES, router
+from users_service.infrastructure.api.routers import (
+    WIRED_MODULES,
+    api_router,
+    health_router,
+)
 from users_service.infrastructure.api.visitor_middleware import VisitorMiddleware
 from users_service.infrastructure.config import Config
+
+logger = logging.getLogger(__name__)
 
 
 def setup_configs() -> Config:
@@ -24,8 +31,9 @@ def setup_container() -> Container:
     return container
 
 
-def setup_routes(app: FastAPI, /) -> None:
-    app.include_router(router)
+def setup_routes(app: FastAPI, config: Config, /) -> None:
+    app.include_router(health_router)
+    app.include_router(api_router, prefix=config.API_PREFIX)
 
 
 def setup_exc_handlers(app: FastAPI, /) -> None:
@@ -35,7 +43,7 @@ def setup_exc_handlers(app: FastAPI, /) -> None:
 def setup_middleware(app: FastAPI, config: Config, /) -> None:
     """Install the middleware a cookie-authenticated browser frontend needs.
 
-    CORS must name the frontend's origins explicitly: a wildcard is not allowed
+    CORS must name the frontend origins explicitly: a wildcard is not allowed
     together with credentials, and cookies are exactly that.
     """
     app.add_middleware(CsrfMiddleware, config=config)
@@ -48,19 +56,27 @@ def setup_middleware(app: FastAPI, config: Config, /) -> None:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+            expose_headers=["Retry-After"],
         )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Prepare the schema/demo data on startup, release resources on shutdown."""
+    """Prepare the database on startup, release resources on shutdown.
+
+    ``SEED_ON_STARTUP`` creates the schema and demo data for a local run. In
+    production it is refused by the config validator: Alembic owns the schema
+    there, and two things creating tables is how drift starts.
+    """
     container: Container = app.state.container
     config: Config = container.config()
 
     engine = container.engine()
-    await create_schema(engine)
     if config.SEED_ON_STARTUP:
+        await create_schema(engine)
         await seed_demo_data(engine, container.password_hasher())
+    else:
+        logger.info("SEED_ON_STARTUP is off; expecting Alembic-managed schema")
 
     yield
 
@@ -81,7 +97,7 @@ def bootstrap() -> FastAPI:
 
     setup_exc_handlers(app)
     setup_middleware(app, config)
-    setup_routes(app)
+    setup_routes(app, config)
 
     return app
 
@@ -94,5 +110,5 @@ def run() -> None:
         factory=True,
         host=config.API_HOST,
         port=config.API_PORT,
-        reload=True,
+        reload=not config.is_production,
     )

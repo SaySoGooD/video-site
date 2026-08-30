@@ -11,11 +11,12 @@ def session_to_entity(row: SessionORM) -> AuthSession:
         jti=row.jti,
         created_at=row.created_at,
         expires_at=row.expires_at,
-        revoked=row.revoked,
+        revoked_at=row.revoked_at,
         visitor_id=(
             VisitorId(row.visitor_id) if row.visitor_id is not None else None
         ),
         user_agent=row.user_agent,
         ip_address=row.ip_address,
-        last_used_at=row.last_used_at,
+        device=row.device,
+        last_seen_at=row.last_seen_at,
     )

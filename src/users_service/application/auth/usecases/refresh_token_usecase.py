@@ -56,7 +56,8 @@ class RefreshTokenUseCase(IRefreshTokenUseCase):
             if user is None or not user.is_active:
                 raise AuthenticationError("User is inactive or missing")
 
-            await uow.sessions.revoke(payload.jti)
+            now = datetime.now(UTC)
+            await uow.sessions.revoke(payload.jti, now)
 
             new_jti = uuid.uuid4().hex
             access = self._token_service.issue_access(user.id, new_jti)
@@ -70,13 +71,13 @@ class RefreshTokenUseCase(IRefreshTokenUseCase):
                     jti=new_jti,
                     created_at=session.created_at,
                     expires_at=refresh.expires_at,
-                    revoked=False,
                     visitor_id=(
                         VisitorId(visitor_id) if visitor_id is not None else None
                     ),
                     user_agent=device.user_agent or session.user_agent,
                     ip_address=device.ip_address or session.ip_address,
-                    last_used_at=datetime.now(UTC),
+                    device=device.device or session.device,
+                    last_seen_at=now,
                 )
             )
             await uow.commit()

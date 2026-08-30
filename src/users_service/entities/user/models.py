@@ -20,6 +20,9 @@ class User:
     ``is_active`` drives the soft-delete rule: a deactivated user stays in the
     database but can no longer log in.
 
+    ``email_verified_at`` is a timestamp rather than a flag: knowing *when*
+    an address was confirmed is what makes an audit trail useful later.
+
     ``visitor_id`` is the browser this account was created from. It is kept so
     the analytics side can stitch a visitor's pre-signup activity to the
     account, and is never exposed on the public profile.
@@ -35,12 +38,18 @@ class User:
     is_active: bool = True
     is_superuser: bool = False
 
+    email_verified_at: datetime | None = None
+
     visitor_id: VisitorId | None = None
 
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
     roles: list[Role] = field(default_factory=list)
+
+    @property
+    def is_email_verified(self) -> bool:
+        return self.email_verified_at is not None
 
     def has_permission(self, resource: str, action: str) -> bool:
         """Return whether the user may perform ``action`` on ``resource``.
@@ -54,7 +63,7 @@ class User:
 
     @property
     def permission_codes(self) -> list[str]:
-        """Flattened, de-duplicated list of ``resource:action`` codes."""
+        """Flattened, de-duplicated list of ``resource.action`` codes."""
         codes = {perm.code for role in self.roles for perm in role.permissions}
         return sorted(codes)
 

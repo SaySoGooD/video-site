@@ -8,17 +8,19 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard
 
 @dataclass
 class DeviceInfoDTO:
-    """Where a login is coming from.
+    """Where a request is coming from.
 
     Filled in by the API layer from the visitor cookie and request headers.
-    Purely descriptive: it is stored on the session so a user can recognise
-    their own devices, and the ``visitor_id`` is what lets the analytics side
-    join browser activity to an account. It never influences authentication.
+    Descriptive only: it is stored on sessions and audit events so a user can
+    recognise their own devices and an investigation has something to go on,
+    and the ``visitor_id`` is what lets the analytics side join browser
+    activity to an account. It never influences authentication.
     """
 
     visitor_id: str | None = None
     user_agent: str | None = None
     ip_address: str | None = None
+    device: str | None = None
 
 
 @dataclass
@@ -51,6 +53,15 @@ class LoginDTO:
 
 
 @dataclass
+class ResetPasswordDTO:
+    """A password reset being completed with a mailed token."""
+
+    token: str
+    password: str
+    password_repeat: str
+
+
+@dataclass
 class AuthTokenDTO:
     """The token pair handed back to a client after login or refresh."""
 
@@ -72,3 +83,21 @@ class AuthResultDTO:
 
     tokens: AuthTokenDTO
     user: "User"
+
+
+@dataclass
+class EmailMessageDTO:
+    """One transactional email, ready to hand to a sender."""
+
+    to: str
+    subject: str
+    body: str
+
+
+@dataclass
+class RateLimitDecision:
+    """The verdict on one attempt against a rate-limited key."""
+
+    allowed: bool
+    remaining: int
+    retry_after_seconds: int

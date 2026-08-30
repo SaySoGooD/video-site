@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 from users_service.entities.session.models import AuthSession
 from users_service.entities.session.value_objects import SessionId
@@ -26,11 +27,20 @@ class ISessionRepository(ABC):
         ...
 
     @abstractmethod
-    async def revoke(self, jti: str) -> None:
+    async def revoke(self, jti: str, moment: datetime) -> None:
         """Revoke a single session by its token id (idempotent)."""
         ...
 
     @abstractmethod
-    async def revoke_all_for_user(self, user_id: UserId) -> None:
-        """Revoke every active session belonging to a user."""
+    async def revoke_all_for_user(
+        self,
+        user_id: UserId,
+        moment: datetime,
+        except_jti: str | None = None,
+    ) -> int:
+        """Revoke every live session of a user, optionally sparing one.
+
+        ``except_jti`` is what makes "sign out my other devices" different
+        from "sign out everywhere". Returns how many sessions were revoked.
+        """
         ...

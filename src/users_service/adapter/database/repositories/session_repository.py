@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,11 +23,12 @@ class SqlAlchemySessionRepository(ISessionRepository):
             jti=auth_session.jti,
             created_at=auth_session.created_at,
             expires_at=auth_session.expires_at,
-            revoked=auth_session.revoked,
+            revoked_at=auth_session.revoked_at,
             visitor_id=auth_session.visitor_id,
             user_agent=auth_session.user_agent,
             ip_address=auth_session.ip_address,
-            last_used_at=auth_session.last_used_at,
+            device=auth_session.device,
+            last_seen_at=auth_session.last_seen_at,
         )
         self._session.add(row)
         await self._session.flush()
@@ -43,30 +46,45 @@ class SqlAlchemySessionRepository(ISessionRepository):
         return session_to_entity(row) if row is not None else None
 
     async def list_active_for_user(self, user_id: UserId) -> list[AuthSession]:
-        # Expiry is filtered in Python via ``AuthSession.is_valid`` rather than
-        # in SQL: backends differ in whether they hand back aware datetimes, and
-        # the entity already owns that rule.
+        # Expiry is filtered in Python via the entity rather than in SQL:
+        # backends differ in whether they hand back aware datetimes, and the
+        # entity already owns that rule.
         result = await self._session.execute(
             select(SessionORM)
             .where(
                 SessionORM.user_id == int(user_id),
-                SessionORM.revoked.is_(False),
+                SessionORM.revoked_at.is_(None),
             )
             .order_by(SessionORM.id.desc())
         )
         sessions = [session_to_entity(row) for row in result.scalars().all()]
         return [s for s in sessions if s.is_valid()]
 
-    async def revoke(self, jti: str) -> None:
+    async def revoke(self, jti: str, moment: datetime) -> None:
         await self._session.execute(
-            update(SessionORM).where(SessionORM.jti == jti).values(revoked=True)
+            update(SessionORM)
+            .where(SessionORM.jti == jti, SessionORM.revoked_at.is_(None))
+            .values(revoked_at=moment)
         )
         await self._session.flush()
 
-    async def revoke_all_for_user(self, user_id: UserId) -> None:
-        await self._session.execute(
+    async def revoke_all_for_user(
+        self,
+        user_id: UserId,
+        moment: datetime,
+        except_jti: str | None = None,
+    ) -> int:
+        statement = (
             update(SessionORM)
-            .where(SessionORM.user_id == int(user_id))
-            .values(revoked=True)
+            .where(
+                SessionORM.user_id == int(user_id),
+                SessionORM.revoked_at.is_(None),
+            )
+            .values(revoked_at=moment)
         )
+        if except_jti is not None:
+            statement = statement.where(SessionORM.jti != except_jti)
+
+        result = await self._session.execute(statement)
         await self._session.flush()
+        return int(result.rowcount or 0)

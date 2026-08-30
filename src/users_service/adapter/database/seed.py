@@ -65,6 +65,8 @@ async def seed_demo_data(engine: AsyncEngine, hasher: IPasswordHasher) -> None:
                 display_name=display,
                 is_active=True,
                 is_superuser=is_super,
+                # Seeded accounts skip the mail round trip.
+                email_verified_at=now,
                 created_at=now,
                 updated_at=now,
             )

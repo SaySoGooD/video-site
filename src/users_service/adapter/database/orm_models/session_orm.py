@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from users_service.adapter.database.base import Base
@@ -16,11 +16,15 @@ class SessionORM(Base):
     jti: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Status is derived from revoked_at + expires_at, never stored.
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     visitor_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(400), nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(45), nullable=True)
-    last_used_at: Mapped[datetime | None] = mapped_column(
+    device: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

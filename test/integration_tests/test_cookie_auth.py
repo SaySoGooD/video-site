@@ -1,6 +1,6 @@
 """The browser-facing half of authentication: HttpOnly cookies + CSRF."""
 
-from conftest import browser_login, csrf_header
+from conftest import API, browser_login, csrf_header
 from fastapi.testclient import TestClient
 
 
@@ -9,7 +9,7 @@ class TestCookieSession:
         self, browser: TestClient
     ) -> None:
         response = browser.post(
-            "/auth/login",
+            f"{API}/auth/login",
             json={"email": "viewer@example.com", "password": "viewer123"},
         )
         assert response.status_code == 200, response.text
@@ -27,34 +27,34 @@ class TestCookieSession:
 
     def test_me_works_without_any_header(self, browser: TestClient) -> None:
         browser_login(browser, "viewer@example.com", "viewer123")
-        response = browser.get("/auth/me")
+        response = browser.get(f"{API}/auth/me")
         assert response.status_code == 200
         assert response.json()["username"] == "viewer"
 
     def test_refresh_uses_the_cookie(self, browser: TestClient) -> None:
         csrf = browser_login(browser, "viewer@example.com", "viewer123")
-        response = browser.post("/auth/refresh", headers=csrf)
+        response = browser.post(f"{API}/auth/refresh", headers=csrf)
         assert response.status_code == 200, response.text
         assert response.json()["tokens"] is None
-        assert browser.get("/auth/me").status_code == 200
+        assert browser.get(f"{API}/auth/me").status_code == 200
 
     def test_logout_clears_the_cookies(self, browser: TestClient) -> None:
         csrf = browser_login(browser, "viewer@example.com", "viewer123")
-        assert browser.post("/auth/logout", headers=csrf).status_code == 204
+        assert browser.post(f"{API}/auth/logout", headers=csrf).status_code == 204
         assert "access_token" not in browser.cookies
-        assert browser.get("/auth/me").status_code == 401
+        assert browser.get(f"{API}/auth/me").status_code == 401
 
 
 class TestCsrfProtection:
     def test_write_without_csrf_header_is_403(self, browser: TestClient) -> None:
         browser_login(browser, "viewer@example.com", "viewer123")
-        response = browser.patch("/auth/me", json={"display_name": "Nope"})
+        response = browser.patch(f"{API}/users/me", json={"display_name": "Nope"})
         assert response.status_code == 403
 
     def test_write_with_wrong_csrf_header_is_403(self, browser: TestClient) -> None:
         browser_login(browser, "viewer@example.com", "viewer123")
         response = browser.patch(
-            "/auth/me",
+            f"{API}/users/me",
             headers=csrf_header("not-the-token"),
             json={"display_name": "Nope"},
         )
@@ -65,18 +65,18 @@ class TestCsrfProtection:
     ) -> None:
         csrf = browser_login(browser, "viewer@example.com", "viewer123")
         response = browser.patch(
-            "/auth/me", headers=csrf, json={"display_name": "Vic the Second"}
+            f"{API}/users/me", headers=csrf, json={"display_name": "Vic the Second"}
         )
         assert response.status_code == 200, response.text
         assert response.json()["display_name"] == "Vic the Second"
 
     def test_reads_need_no_csrf_header(self, browser: TestClient) -> None:
         browser_login(browser, "viewer@example.com", "viewer123")
-        assert browser.get("/auth/me").status_code == 200
+        assert browser.get(f"{API}/auth/me").status_code == 200
 
     def test_first_login_needs_no_csrf_header(self, browser: TestClient) -> None:
         response = browser.post(
-            "/auth/login",
+            f"{API}/auth/login",
             json={"email": "viewer@example.com", "password": "viewer123"},
         )
         assert response.status_code == 200
