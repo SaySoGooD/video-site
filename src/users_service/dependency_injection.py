@@ -78,6 +78,12 @@ from users_service.application.auth.usecases.update_user_usecase import (
 from users_service.application.auth.usecases.verify_email_usecase import (
     VerifyEmailUseCase,
 )
+from users_service.application.moderation.usecases.ban_user_usecase import (
+    BanUserUseCase,
+)
+from users_service.application.moderation.usecases.unban_user_usecase import (
+    UnbanUserUseCase,
+)
 from users_service.application.users.usecases.get_user_profile_usecase import (
     GetUserProfileUseCase,
 )
@@ -250,6 +256,11 @@ class Container(containers.DeclarativeContainer):
     )
     revoke_all_sessions_usecase = providers.Factory(
         RevokeAllSessionsUseCase, uow=uow
+    )
+
+    ban_user_usecase = providers.Factory(BanUserUseCase, uow=uow, cache=cache)
+    unban_user_usecase = providers.Factory(
+        UnbanUserUseCase, uow=uow, cache=cache
     )
 
     list_roles_usecase = providers.Factory(ListRolesUseCase, uow=uow)

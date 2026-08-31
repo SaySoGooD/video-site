@@ -125,7 +125,7 @@ credential — nothing is authorized on the strength of it.
 
 Audit actions: `REGISTER`, `LOGIN`, `LOGIN_FAILED`, `LOGOUT`,
 `PASSWORD_CHANGED`, `PASSWORD_RESET`, `EMAIL_VERIFIED`, `SESSION_REVOKED`,
-`USER_BANNED`.
+`USER_BANNED`, `USER_UNBANNED`.
 
 ## API
 
@@ -153,6 +153,12 @@ unversioned.
 - `DELETE /users/me/sessions?keep_current=true` — log out from all devices;
   `keep_current` spares the caller's own
 - `GET    /users/{id}` — public profile: id, username, display name, created_at
+
+### Moderation — requires `users.ban`
+- `POST   /admin/users/{id}/ban` — deactivate an account and revoke its sessions
+  (optional `reason` goes into the audit row); 403 for a superuser target,
+  422 for your own account
+- `DELETE /admin/users/{id}/ban` — reactivate it; the old sessions stay revoked
 
 ### Admin — requires `users.manage`
 - `GET/POST /admin/permissions`
@@ -326,8 +332,14 @@ every one of them is silent at runtime:
 
 ## Not built yet
 
-Two-factor auth, admin-driven bans (the action is in the audit vocabulary, the
-endpoint is not), and account deletion beyond soft-delete.
+Two-factor auth, and changing a password from inside a session
+(`PASSWORD_CHANGED` is in the audit vocabulary, the endpoint is not).
+
+Hard deletion is deliberately absent, not merely unwritten: what happens to a
+deleted account's uploads and comments is a product decision, and `is_active`
+plus a revoked session list already stops the account being used. Audit rows
+outlive the account by design — `user_id` is `ON DELETE SET NULL`, so the event
+survives while the identity does not.
 
 ## License
 
