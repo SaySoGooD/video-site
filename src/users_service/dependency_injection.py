@@ -55,6 +55,9 @@ from users_service.application.auth.services.email_verification_issuer import (
 from users_service.application.auth.usecases.authenticate_usecase import (
     AuthenticateUseCase,
 )
+from users_service.application.auth.usecases.change_password_usecase import (
+    ChangePasswordUseCase,
+)
 from users_service.application.auth.usecases.delete_user_usecase import (
     DeleteUserUseCase,
 )
@@ -221,6 +224,9 @@ class Container(containers.DeclarativeContainer):
     )
     delete_user_usecase = providers.Factory(
         DeleteUserUseCase, uow=uow, cache=cache
+    )
+    change_password_usecase = providers.Factory(
+        ChangePasswordUseCase, uow=uow, hasher=password_hasher, cache=cache
     )
     verify_email_usecase = providers.Factory(
         VerifyEmailUseCase,

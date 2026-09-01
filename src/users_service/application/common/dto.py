@@ -53,6 +53,15 @@ class LoginDTO:
 
 
 @dataclass
+class ChangePasswordDTO:
+    """A password change made from inside a logged-in session."""
+
+    current_password: str
+    new_password: str
+    new_password_repeat: str
+
+
+@dataclass
 class ResetPasswordDTO:
     """A password reset being completed with a mailed token."""
 

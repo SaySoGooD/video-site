@@ -7,13 +7,20 @@ surface an account page is built from.
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, Depends, Query, Response, status
 
+from users_service.application.auth.interfaces.i_change_password_usecase import (
+    IChangePasswordUseCase,
+)
 from users_service.application.auth.interfaces.i_delete_user_usecase import (
     IDeleteUserUseCase,
 )
 from users_service.application.auth.interfaces.i_update_user_usecase import (
     IUpdateUserUseCase,
 )
-from users_service.application.common.dto import DeviceInfoDTO, UpdateUserDTO
+from users_service.application.common.dto import (
+    ChangePasswordDTO,
+    DeviceInfoDTO,
+    UpdateUserDTO,
+)
 from users_service.application.users.interfaces.i_get_user_profile_usecase import (
     IGetUserProfileUseCase,
 )
@@ -37,11 +44,15 @@ from users_service.infrastructure.api.dependencies import (
     get_current_user,
     get_device_info,
 )
-from users_service.infrastructure.api.models.auth import UpdateProfileRequest
+from users_service.infrastructure.api.models.auth import (
+    ChangePasswordRequest,
+    UpdateProfileRequest,
+)
 from users_service.infrastructure.api.models.public_user_response import (
     PublicUserResponse,
 )
 from users_service.infrastructure.api.models.session_response import (
+    PasswordChangedResponse,
     RevokedSessionsResponse,
     SessionSummary,
 )
@@ -83,6 +94,45 @@ async def update_me(
         ),
     )
     return to_user_response(updated)
+
+
+@router.post("/me/password", response_model=PasswordChangedResponse)
+@inject
+async def change_my_password(
+    body: ChangePasswordRequest,
+    response: Response,
+    user: User = Depends(get_current_user),
+    device: DeviceInfoDTO = Depends(get_device_info),
+    cookies: SessionCookies = Depends(get_cookies),
+    usecase: IChangePasswordUseCase = Depends(
+        Provide[Container.change_password_usecase]
+    ),
+) -> PasswordChangedResponse:
+    """Change the password and sign every device out, this one included.
+
+    Requires the current password: a stolen session must not be enough to take
+    the account over. 401 if it is wrong, 422 if the new one does not match its
+    repeat or equals the old one.
+
+    Afterwards nothing that was issued before still authenticates — the old
+    access token is refused, the old refresh token cannot rotate, and the
+    browser cookies are cleared here. The user signs in again with the new
+    password.
+    """
+    revoked = await usecase(
+        user.id,
+        ChangePasswordDTO(
+            current_password=body.current_password,
+            new_password=body.new_password,
+            new_password_repeat=body.new_password_repeat,
+        ),
+        device,
+    )
+    cookies.clear_tokens(response)
+    return PasswordChangedResponse(
+        detail="Password updated. All sessions have been signed out.",
+        sessions_revoked=revoked,
+    )
 
 
 @router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)

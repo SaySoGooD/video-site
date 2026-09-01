@@ -120,6 +120,7 @@ credential — nothing is authorized on the strength of it.
 | Lockout | Exceeding the per-account limit locks it for the rest of the window (default 5 / 15 min); a successful login clears the counter |
 | Email verification | One-time token, **stored only as a SHA-256 hash**; changing the email un-verifies the account and re-sends |
 | Password reset | Same token machinery, 30-minute expiry, single use — and completing it **revokes every session** |
+| Password change | Requires the current password, so a stolen session cannot take the account over; revokes every session and spends any outstanding reset link |
 | Enumeration | Bad password and unknown account return the same 401; `forgot-password` answers identically for known and unknown addresses |
 | Audit | Every event below is appended in the same transaction as the action it records |
 
@@ -147,6 +148,8 @@ unversioned.
 ### Users
 - `GET    /users/me` — own account (email, verification state, roles, permissions)
 - `PATCH  /users/me` — update username / display name / email
+- `POST   /users/me/password` — change the password; requires the current one,
+  then signs **every** device out (the caller included) and clears the cookies
 - `DELETE /users/me` — soft-delete: deactivate + revoke every session (204)
 - `GET    /users/me/sessions` — live logins, `current: true` on this one
 - `DELETE /users/me/sessions/{id}` — sign that device out (404 if not yours)
@@ -332,8 +335,7 @@ every one of them is silent at runtime:
 
 ## Not built yet
 
-Two-factor auth, and changing a password from inside a session
-(`PASSWORD_CHANGED` is in the audit vocabulary, the endpoint is not).
+Two-factor auth.
 
 Hard deletion is deliberately absent, not merely unwritten: what happens to a
 deleted account's uploads and comments is a product decision, and `is_active`

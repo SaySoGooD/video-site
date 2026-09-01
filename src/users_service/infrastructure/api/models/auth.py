@@ -83,3 +83,19 @@ class SessionResponse(BaseModel):
     user: UserResponse
     csrf_token: str | None = None
     tokens: TokenResponse | None = None
+
+
+class ChangePasswordRequest(BaseModel):
+    """Changing a password from inside a session.
+
+    The current password is required: a stolen session must not be enough to
+    take the account over.
+    """
+
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(
+        min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH
+    )
+    new_password_repeat: str = Field(
+        min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH
+    )

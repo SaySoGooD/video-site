@@ -25,3 +25,10 @@ class RevokedSessionsResponse(BaseModel):
     """How many devices a bulk sign-out actually knocked offline."""
 
     revoked: int
+
+
+class PasswordChangedResponse(BaseModel):
+    """The outcome of a password change: everyone was signed out."""
+
+    detail: str
+    sessions_revoked: int
