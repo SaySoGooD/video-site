@@ -1,6 +1,59 @@
 # video-site
 
-The backend of a video site. Right now it contains one service.
+The backend of a video site. Two services so far, in one repository and one
+Python project: each is a package under `src/`, they share a lockfile and an
+image, and they differ by the module that gets run.
+
+```
+        Browser
+           │
+           ▼
+      gateway  :8000        the only port exposed to the world
+           │
+     ┌─────┴──────┐
+     ▼            ▼
+users-service   content-service        (not built yet)
+  :8001
+     │
+     ▼
+ PostgreSQL + Redis
+```
+
+## gateway
+
+One entry point in front of everything. It knows prefixes, not APIs, so a
+service adding an endpoint never requires a gateway release.
+
+- `/api/v1/auth`, `/api/v1/users`, `/api/v1/admin` → users-service
+- `/api/v1/content` → content-service; **503** while `GATEWAY_CONTENT_SERVICE_URL`
+  is unset, which is the honest difference between "no such API" and "that part
+  of the system is not running"
+- `/health`, `/health/ready` — unversioned probes; readiness also asks
+  users-service whether *it* is ready
+
+**Who is calling.** The gateway does not verify JWTs itself: it asks
+users-service (`GET /auth/me`) on every request that needs an identity,
+forwarding the caller's cookie or bearer token. That costs a hop and buys
+immediacy — a revoked session, a signed-out device or a banned account stops
+working *now*, not when the access token happens to expire. What goes
+downstream is a set of headers:
+
+```
+X-User-Id  X-User-Username  X-User-Permissions
+X-User-Superuser  X-User-Email-Verified  X-Visitor-Id
+```
+
+Those headers are a credential in their own right — a service behind the
+gateway believes them. So the gateway **strips any that arrived from the
+client** before adding its own; otherwise anyone could send `X-User-Id: 1` and
+be an administrator. `X-Visitor-Id` comes from the browser's cookie rather than
+the account, so anonymous traffic carries it too — which is the case analytics
+actually cares about.
+
+Requests and responses are streamed, not buffered: a video upload must not sit
+in the gateway's memory. An upstream that is unreachable answers **502**, one
+that is too slow **504**, and every request carries an `X-Request-Id` (kept if
+the client sent one) so a single call can be followed across services.
 
 ## users-service
 
@@ -174,6 +227,22 @@ unversioned.
 - `GET /health` — liveness: the process is up, nothing else is touched
 - `GET /health/ready` — readiness: 503 if the database is unreachable
 
+## Databases
+
+One PostgreSQL instance, **one database per service** (`users_service`,
+`content_service`, ...). Not one shared database: each service then keeps its
+own `alembic_version`, gets a user with rights to nothing else, and cannot grow
+a convenient JOIN across a boundary that is supposed to be a boundary. Two
+services both wanting a table called `tags` never have to negotiate. Moving one
+service to its own instance later is a change of `DB_HOST`, nothing more.
+
+The compose file creates the users-service database; a second service adds its
+own to the same instance.
+
+In Kubernetes the migrations run as a Job or an init container before the
+rollout, not from the application container — in compose that is still the
+`alembic upgrade head &&` in front of the server command.
+
 ## Data model
 
 Classic RBAC: **users → roles → permissions**. Users never hold permissions
@@ -230,6 +299,7 @@ DTOs and pydantic models are the exception). Application ports are `ABC`s
 implemented by adapters.
 
 ```
+src/gateway/                    # routing table, identity resolution, proxying
 src/users_service/
 ├── entities/                   # User, Role, Permission, AuthSession,
 │                               # SecurityToken, AuditEvent
@@ -269,7 +339,10 @@ docker compose up --build
 ```
 
 Compose waits for PostgreSQL and Redis to report healthy, applies the Alembic
-migrations, then serves on http://localhost:8001/docs.
+migrations, then serves the gateway on http://localhost:8000. Only that port is
+published — users-service is reachable inside the compose network, the way it
+will sit in Kubernetes. Its own docs are at http://localhost:8001/docs when you
+run it directly.
 
 Without Docker:
 
@@ -288,11 +361,11 @@ uv run python -m users_service
 Log in and use the cookie jar:
 
 ```bash
-curl -c jar -X POST http://localhost:8001/api/v1/auth/login -H "Content-Type: application/json" -d '{"email":"admin@example.com","password":"admin123"}'
+curl -c jar -X POST http://localhost:8000/api/v1/auth/login -H "Content-Type: application/json" -d '{"email":"admin@example.com","password":"admin123"}'
 ```
 
 ```bash
-curl -b jar http://localhost:8001/api/v1/users/me
+curl -b jar http://localhost:8000/api/v1/users/me
 ```
 
 ## Migrations
@@ -314,6 +387,11 @@ uv run alembic upgrade head
 uv run pytest -q
 ```
 
+`test/gateway_tests/` runs the gateway against the **real** users-service in the
+same process (its HTTP client dispatches into an ASGI transport instead of a
+socket), so routing, identity resolution and header rewriting are exercised
+against the service they will be deployed with rather than against a mock.
+
 `test/unit_tests/` covers pure logic (hashers, token service, rate limiter,
 domain permissions, production config validation). `test/integration_tests/`
 runs the full stack — container, unit of work, repositories, use cases,
@@ -334,6 +412,9 @@ every one of them is silent at runtime:
 - `SEED_ON_STARTUP=false`
 
 ## Not built yet
+
+content-service — the API prefix and the `content.*` permissions are already
+in place, the service behind them is not.
 
 Two-factor auth.
 

@@ -1,8 +1,11 @@
-"""Alembic environment.
+"""Alembic environment for users-service.
 
 The database URL comes from the application config, so migrations and the
 running service can never point at different databases by accident, and no
 credentials live in ``alembic.ini``.
+
+Each service owns its own database, so the default ``alembic_version`` table is
+enough: there is no other service's history to share it with.
 """
 
 import asyncio

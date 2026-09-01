@@ -1,8 +1,9 @@
-# Local stack: API + PostgreSQL + Redis.
+# Local stack: gateway + users-service + PostgreSQL + Redis.
 #
-# The API waits for both dependencies to report healthy, then applies the
-# Alembic migrations before serving — so a fresh checkout comes up with the
-# right schema and no manual step.
+# One image serves both services — they live in the same project and differ
+# only by the module they run. The gateway is the single port published to the
+# host; users-service is reachable only inside the compose network, which is
+# how it will sit in Kubernetes too.
 
 services:
   postgres:
@@ -18,8 +19,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    # Not published to the host by default: the API reaches it over the
-    # compose network, and a database on 0.0.0.0:5432 is how servers get owned.
+    # Not published to the host: a database on 0.0.0.0:5432 is how servers get
+    # owned. One instance, one database per service — see the README.
     expose:
       - "5432"
 
@@ -35,7 +36,7 @@ services:
     expose:
       - "6379"
 
-  api:
+  users-service:
     build: .
     depends_on:
       postgres:
@@ -52,13 +53,29 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       SEED_ON_STARTUP: ${SEED_ON_STARTUP:-false}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
-      CORS_ORIGINS: ${CORS_ORIGINS:-[]}
-    ports:
-      - "${API_PORT:-8001}:8001"
+      SERVICE_PORT: "8001"
+    expose:
+      - "8001"
     command: >
       sh -c "alembic upgrade head &&
              uvicorn users_service.bootstrap:bootstrap --factory
              --host 0.0.0.0 --port 8001"
+
+  gateway:
+    build: .
+    depends_on:
+      - users-service
+    environment:
+      GATEWAY_USERS_SERVICE_URL: http://users-service:8001
+      # Set once the service exists; until then /api/v1/content answers 503.
+      GATEWAY_CONTENT_SERVICE_URL: ${GATEWAY_CONTENT_SERVICE_URL:-}
+      GATEWAY_CORS_ORIGINS: ${GATEWAY_CORS_ORIGINS:-[]}
+      GATEWAY_TRUST_PROXY_HEADERS: ${GATEWAY_TRUST_PROXY_HEADERS:-false}
+      SERVICE_PORT: "8000"
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    command: >
+      uvicorn gateway.bootstrap:bootstrap --factory --host 0.0.0.0 --port 8000
 
 volumes:
   postgres_data:

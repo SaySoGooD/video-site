@@ -1,7 +1,7 @@
 [project]
 name = "users-service"
 version = "0.1.0"
-description = "Users service: accounts, sessions and RBAC for a video site"
+description = "Video site backend: gateway and users service"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -24,7 +24,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/users_service"]
+packages = ["src/users_service", "src/gateway"]
 
 [dependency-groups]
 dev = [
